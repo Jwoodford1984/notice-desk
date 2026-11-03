@@ -298,12 +298,14 @@ async function vNotice(id) {
 
   // Instrument file
   let filePanel = '';
-  if (n.requires_file || file) {
-    filePanel = `<section class="panel"><div class="panel-h"><h2>Instrument file</h2>${file ? `<label class="btn small" for="nfile">Replace file</label>` : pill('awaiting_file')}</div>
-      ${file ? `<dl class="fields"><dt>File</dt><dd class="mono">${esc(file.file_name)}</dd><dt>Rows read</dt><dd>${file.row_count.toLocaleString('en-GB')}</dd>
-        <dt>Columns detected</dt><dd>${Object.entries(file.detected_columns || {}).map(([k, v]) => `<span class="chip" style="margin:0 4px 4px 0">${esc(k.replace('_', ' '))}: ${esc(v || '—')}</span>`).join('')}</dd>
-        <dt>Attached</dt><dd>${fmtDate(file.created_at.slice(0, 10))}</dd></dl>`
-      : `<div class="drop" id="drop"><b>Drop the ${esc(n.vendor)} spreadsheet here</b><span class="muted">.xlsx, .xls or .csv. The ${n.kind === 'ticker' ? 'ticker' : 'RIC'} column is found automatically.</span>
+  if (canEdit || file) {
+    filePanel = `<section class="panel"><div class="panel-h"><h2>Instrument file</h2>${file ? (canEdit ? `<label class="btn small" for="nfile">Replace file</label>` : '') : n.requires_file ? pill('awaiting_file') : '<span class="pill p-nr">Optional</span>'}</div>
+      ${file ? `<dl class="fields"><dt>File</dt><dd class="mono">${esc(file.file_name)}</dd><dt>Rows</dt><dd>${(file.total_rows ?? file.row_count).toLocaleString('en-GB')}${file.matched_only ? ` · ${(file.stored_rows || 0).toLocaleString('en-GB')} in your usage kept` : ''}</dd>
+        ${(file.sheets || []).length ? `<dt>Sheets</dt><dd>${file.sheets.map(s => `<span class="chip" style="margin:0 4px 4px 0">${esc(s.name)}: ${Number(s.rows).toLocaleString('en-GB')}</span>`).join('')}</dd>` : ''}
+        <dt>Columns</dt><dd>${Object.entries(file.detected_columns || {}).filter(([, v]) => v).map(([k, v]) => `<span class="chip" style="margin:0 4px 4px 0">${esc(k.replace('_', ' '))}: ${esc(v)}</span>`).join('')}</dd>
+        <dt>Attached</dt><dd>${fmtDate(file.created_at.slice(0, 10))}</dd></dl>
+        ${file.matched_only ? '<p class="muted" style="margin:0;font-size:12px">Only instruments in your usage were stored. Attach the file again after loading a new usage file to re-check it.</p>' : ''}`
+      : `<div class="drop" id="drop"><b>Drop the ${esc(n.vendor)} spreadsheet here</b><span class="muted">${n.requires_file ? '' : 'Optional: adds RIC-level matching and an access check. '}LSEG remove / addNew / update files, or any sheet with a RIC or ticker column.</span>
         <div class="row" style="justify-content:center"><label class="btn primary" for="nfile">Choose file</label>${n.portal_url ? `<a class="btn" href="${esc(n.portal_url)}" target="_blank" rel="noopener">Open vendor portal</a>` : ''}</div></div>`}
       <input type="file" id="nfile" accept=".xlsx,.xls,.csv" hidden>
     </section>`;
@@ -314,29 +316,33 @@ async function vNotice(id) {
   if (file) {
     const U = n.kind === 'ticker' ? 'tickers' : 'RICs';
     const byCode = new Map();
-    inst.forEach(m => { if (!byCode.has(m.instrument_id)) byCode.set(m.instrument_id, { code: m.current_code, new: m.new_code, change: m.change_type, rows: [] }); byCode.get(m.instrument_id).rows.push(m); });
+    inst.forEach(m => { if (!byCode.has(m.instrument_id)) byCode.set(m.instrument_id, { code: m.current_code, new: m.new_code, change: m.change_type, name: m.ric_name, oldPdp: m.old_pdp, newPdp: m.new_pdp, rows: [] }); byCode.get(m.instrument_id).rows.push(m); });
     const owners = groupOwners(inst.map(m => m.login));
     impactHtml = `<section class="panel"><div class="panel-h"><h2>Impact</h2></div>
       <div class="stats"><div class="stat"><b>${(impact?.instruments || 0).toLocaleString('en-GB')}</b><span>${U} in notice</span></div>
         <div class="stat ${impact?.used_direct ? 'hot' : ''}"><b>${impact?.used_direct || 0}</b><span>Used directly</span></div>
         <div class="stat ${impact?.used_via_chain ? 'hot' : ''}"><b>${impact?.used_via_chain || 0}</b><span>Used via a chain</span></div>
         <div class="stat"><b>${impact?.logins_affected || 0}</b><span>Logins affected</span></div>
-        <div class="stat"><b>${impact?.cost_centres || 0}</b><span>Cost centres</span></div></div>
+        <div class="stat"><b>${impact?.cost_centres || 0}</b><span>Cost centres</span></div>
+        <div class="stat ${impact?.logins_losing_access ? 'hot' : ''}"><b>${impact?.logins_losing_access || 0}</b><span>Logins losing access</span></div></div>
+      ${impact?.logins_losing_access ? `<div class="banner"><b>${impact.logins_losing_access} login${impact.logins_losing_access === 1 ? '' : 's'}</b> request RICs whose new PDPs they aren't permissioned for (marked ⚠). They lose access on ${fmtDate(n.effective_date)} unless a new service is ordered.</div>` : ''}
       <div class="tabs"><button class="${tab === 'used' ? 'on' : ''}" data-tab="used">In use (${byCode.size})</button><button class="${tab === 'owner' ? 'on' : ''}" data-tab="owner">By user (${owners.length})</button></div>
       ${tab === 'owner' ? `<div class="tbl-wrap"><table><thead><tr><th>Login</th><th>Name</th><th class="num">${U}</th></tr></thead><tbody>${owners.map(o => `<tr><td class="mono">${esc(o.login)}</td><td>${esc(inst.find(m => m.login === o.login)?.user_name || '')}</td><td class="num mono">${uniq(inst.filter(m => m.login === o.login).map(m => m.instrument_id)).length}</td></tr>`).join('')}</tbody></table></div>`
-      : byCode.size ? `<div class="tbl-wrap"><table><thead><tr><th>Current</th><th>New</th><th>Change</th><th>Match</th><th>Used by</th><th>Cost centre</th></tr></thead><tbody>
-        ${[...byCode.values()].map(r => `<tr><td class="mono">${esc(r.code)}</td><td class="mono">${esc(r.new || '—')}</td><td>${esc(r.change || '')}</td>
+      : byCode.size ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>Change</th><th>PDPs</th><th>Match</th><th>Used by</th><th>Cost centre</th></tr></thead><tbody>
+        ${[...byCode.values()].map(r => `<tr><td class="mono">${esc(r.code)}${r.new ? `<br>→ ${esc(r.new)}` : ''}${r.name ? `<br><span class="muted" style="font-size:11px;font-family:var(--f-body)">${esc(r.name)}</span>` : ''}</td><td style="min-width:110px">${esc(r.change || '')}</td>
+          <td class="mono" style="min-width:120px;font-size:12px">${pdpDiff(r.oldPdp, r.newPdp)}</td>
           <td>${r.rows.some(x => x.match_type === 'direct') ? '<span class="tag-used">In use</span>' : `<span class="tag-chain">Via chain</span><br><span class="mono muted" style="font-size:11px">${esc(uniq(r.rows.map(x => x.used_item)).join(', '))}</span>`}</td>
-          <td style="min-width:180px"><div class="row" style="gap:4px">${uniq(r.rows.map(x => x.login)).map(l => `<span class="chip ${isAppLogin(l) ? 'app' : ''}">${esc(r.rows.find(x => x.login === l).user_name || l)}</span>`).join('')}</div></td>
+          <td style="min-width:180px"><div class="row" style="gap:4px">${uniq(r.rows.map(x => x.login)).map(l => { const x = r.rows.find(y => y.login === l); return `<span class="chip ${isAppLogin(l) ? 'app' : ''}" title="${esc(ACCESS_TITLE[x.access] || '')}">${x.access === 'loses' ? '⚠ ' : ''}${esc(x.user_name || l)}</span>`; }).join('')}</div></td>
           <td class="mono">${esc(uniq(r.rows.map(x => x.cost_centre).filter(Boolean)).join(', ') || '—')}</td></tr>`).join('')}</tbody></table></div>`
       : `<p class="empty">None of the ${U} in this notice appear in your current usage file.</p>`}
     </section>`;
-  } else if (changes.length) {
+  }
+  if (changes.length) {
     const held = new Map(); pdp.forEach(m => { if (!held.has(m.code)) held.set(m.code, { ...m, logins: [] }); held.get(m.code).logins.push(m); });
     const allCodes = uniq(changes.flatMap(c => [...(c.old_pdps || []), ...(c.new_pdps || [])]));
     const hl = arr => (arr || []).map(c => held.has(c) ? `<b class="tag-used">${esc(c)}</b>` : esc(c)).join(', ') || '<span class="muted">—</span>';
     const sideTxt = { old: 'Removed or replaced', new: 'Being added', both: 'On both sides (mapping changes)' };
-    impactHtml = `<section class="panel"><div class="panel-h"><h2>Impact</h2><span class="muted" style="font-size:12px">PDP match against your current permission file</span></div>
+    impactHtml += `<section class="panel"><div class="panel-h"><h2>${file ? 'PDP impact' : 'Impact'}</h2><span class="muted" style="font-size:12px">PDP match against your current permission file</span></div>
       <div class="stats"><div class="stat ${held.size ? 'hot' : ''}"><b>${held.size}</b><span>PDPs you hold</span></div><div class="stat"><b>${allCodes.length}</b><span>PDPs in notice</span></div>
         <div class="stat ${perm.length ? 'hot' : ''}"><b>${uniq(perm.map(p => p.login)).length}</b><span>Logins permissioned</span></div>
         <div class="stat"><b>${uniq(perm.map(p => p.login)).filter(isAppLogin).length}</b><span>System logins</span></div></div>
@@ -351,7 +357,7 @@ async function vNotice(id) {
       </tbody></table></div>
       <p class="muted" style="margin:0;font-size:12px">Codes in red are permissioned on your site.</p>
     </section>`;
-  } else if ((n.service_codes || []).length) {
+  } else if (!file && (n.service_codes || []).length) {
     impactHtml = `<section class="panel"><div class="panel-h"><h2>Impact</h2><span class="muted" style="font-size:12px">Exchange-level match on <span class="mono">${esc(n.service_codes.join(', '))}</span></span></div>
       <div class="stats"><div class="stat ${perm.length ? 'hot' : ''}"><b>${uniq(perm.map(p => p.login)).length}</b><span>Logins permissioned</span></div></div>
       ${perm.length ? `<div class="tbl-wrap"><table><thead><tr><th>Login</th><th>Name</th><th>Service</th><th>Fee</th><th>Email</th></tr></thead><tbody>
@@ -400,6 +406,16 @@ async function vNotice(id) {
       ${n.description ? `<details><summary>Full description</summary><div style="white-space:pre-wrap;margin-top:8px;font-size:13px">${esc(n.description)}</div></details>` : ''}
     </section>
   </div>`;
+}
+const ACCESS_TITLE = { keeps: 'Permissioned for at least one of the new PDPs', loses: 'Not permissioned for any of the new PDPs: loses access', unknown: 'Access not checked (no new PDPs, or login not in the permission file)' };
+/** Show what a PDP list change adds and removes, ignoring LSEG's WW* product-level codes. */
+function pdpDiff(oldList, newList) {
+  if (!oldList && !newList) return '<span class="muted">—</span>';
+  const sp = s => new Set(String(s || '').replace(/\u00a0/g, ' ').split(/[\s,;]+/).filter(c => c && !/^WW/.test(c)));
+  const o = sp(oldList), n = sp(newList);
+  const rem = [...o].filter(c => !n.has(c)), add = [...n].filter(c => !o.has(c));
+  if (!rem.length && !add.length) return `<span class="muted">${esc([...n].join(', ') || 'No change')}</span>`;
+  return [...rem.map(c => `<span class="tag-used">−${esc(c)}</span>`), ...add.map(c => `<span style="color:var(--ok);font-weight:600">+${esc(c)}</span>`)].join(' ');
 }
 function groupOwners(logins) { return uniq(logins).map(login => ({ login })); }
 function emailText(n, a) {
@@ -548,12 +564,48 @@ async function importSummary(file) {
   const r = await fn('import-change-summary', { tenant_id: S.tenantId, storage_path: path, file_name: file.name });
   S.source = 'summary'; toast(`${r.notices_created} new notices, ${r.notices_updated} updated from ${r.rows} rows`); route();
 }
+/** Show a message that stays until replaced (for long-running file reads). */
+function busy(msg) { const t = $('#toast'); t.innerHTML = `<span class="spin"></span> ${esc(msg)}`; t.hidden = false; clearTimeout(toast.t); }
+function readInWorker(buffer, vendor, codes, chains) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(new URL('./notice-worker.js', import.meta.url), { type: 'module' });
+    w.onmessage = e => {
+      if (e.data.progress) return busy(e.data.progress);
+      w.terminate(); e.data.ok ? resolve(e.data.result) : reject(new Error(e.data.error));
+    };
+    w.onerror = e => { w.terminate(); reject(new Error(e.message || 'The spreadsheet reader failed to start. Reload the page and try again.')); };
+    w.postMessage({ buffer, vendor, codes, chains }, [buffer]);
+  });
+}
+// Notice files are read in the browser: LSEG files can hold 650,000 rows, far
+// beyond what an Edge Function can process. Only instruments that appear in
+// current usage are stored; the file row keeps the full count.
 async function attachNoticeFile(file) {
-  const id = CUR.n.id; toast(`Reading ${file.name}…`);
-  const path = `${S.tenantId}/notices/${id}/${Date.now()}_${safeName(file.name)}`;
-  await upload('notice-files', path, file);
-  const r = await fn('parse-notice-file', { notice_id: id, storage_path: path, file_name: file.name });
-  toast(`Read ${r.rows.toLocaleString('en-GB')} rows`); route();
+  const n = CUR.n; const vendor = n.kind === 'ticker' || n.vendor === 'Bloomberg' ? 'Bloomberg' : 'LSEG';
+  try {
+    busy(`Reading ${file.name}${file.size > 5e6 ? ' (large file: this can take a minute)' : ''}…`);
+    const usage = await q(sb.rpc('current_usage_codes', { p_tenant_id: S.tenantId, p_vendor: vendor }));
+    if (!usage.source_id) throw new Error(`Load a ${vendor === 'Bloomberg' ? 'B-PIPE' : 'LSEG'} usage file in Data sources first, so this notice can be matched.`);
+    const res = await readInWorker(await file.arrayBuffer(), vendor, usage.codes, usage.chains);
+    if (!res.total) throw new Error('No instrument rows found. Check the file has a RIC, ticker or "Resource Item RIC" column.');
+    busy(`Saving ${res.rows.length.toLocaleString('en-GB')} matched instruments…`);
+    const path = `${S.tenantId}/notices/${n.id}/${Date.now()}_${safeName(file.name)}`;
+    let storagePath = path;
+    try { await upload('notice-files', path, file); } catch (e) { storagePath = null; res.warnings.push(`The original file wasn't kept in storage: ${e.message}`); }
+    const f = await q(sb.from('notice_files').insert({
+      tenant_id: S.tenantId, notice_id: n.id, file_name: file.name, storage_path: storagePath,
+      sheet_name: res.sheets.map(s => s.name).join(', '), detected_columns: res.columns,
+      row_count: res.total, total_rows: res.total, stored_rows: res.rows.length, matched_only: true,
+      sheets: res.sheets, usage_source_id: usage.source_id,
+    }).select('id').single());
+    try {
+      for (let i = 0; i < res.rows.length; i += 500) {
+        await q(sb.from('notice_instruments').insert(res.rows.slice(i, i + 500).map(r => ({ ...r, tenant_id: S.tenantId, notice_id: n.id, file_id: f.id, vendor }))));
+      }
+    } catch (e) { await sb.from('notice_files').delete().eq('id', f.id); throw e; }
+    toast(`Read ${res.total.toLocaleString('en-GB')} rows. ${res.rows.length.toLocaleString('en-GB')} appear in your usage.${res.warnings.length ? ' ' + res.warnings[0] : ''}`);
+    route();
+  } catch (err) { toast(err.message); }
 }
 async function loadSource(file, kind) {
   toast(`Loading ${file.name}…`);

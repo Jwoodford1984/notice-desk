@@ -8,6 +8,7 @@ Notice Desk tracks market data change notifications from LSEG, Bloomberg and the
 ## What it does
 
 - **Imports the LSEG Quarterly Change Summary.** It creates one notice per Notification ID and stores the old and new PDP, PE and price for each line. Re-importing updates notices in place and keeps their status, files and actions.
+- **Reads LSEG notice spreadsheets.** It reads every tab (`remove`, `addNew`, `update`) along with other layouts, and handles files of 650,000+ rows. Files are read in the browser and only instruments in your usage are stored. Each matched user and RIC gets an access check: does the login hold any of the RIC's new PDPs?
 - **Reads DACS exports.** These are the *Usage Detail by User* and *Active Permission by Exchange* reports. It also reads Bloomberg B-PIPE usage CSVs. A new file replaces the old one only once it has loaded completely.
 - **Matches notices against your data:**
   - **RICs and tickers:** instruments in a notice's spreadsheet are matched against usage, including chain RICs, delayed `/` RICs and tickers in any case or spacing.
@@ -20,7 +21,8 @@ Notice Desk tracks market data change notifications from LSEG, Bloomberg and the
 ```
 index.html, assets/          the web app (assets/config.js holds the Supabase URL and publishable key)
 supabase/migrations/         schema, logic, RLS, storage, change-summary import
-supabase/functions/          parse-source, parse-notice-file, import-change-summary (+ _shared parsers)
+supabase/functions/          parse-source, parse-notice-file, import-change-summary (+ _shared parsers;
+                             _shared/notice-workbook.js is also used by the app's assets/notice-worker.js)
 supabase/seed.sql            demo workspace with invented data
 dashboard/                   single-file copies for pasting into the Supabase dashboard
 scripts/                     seed generator, sample B-PIPE data
