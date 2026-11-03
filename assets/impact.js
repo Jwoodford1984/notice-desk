@@ -185,7 +185,7 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
         const missingNew = [...newS].filter(x => !held.has(x));
         const lostOld = holdsOld.filter(x => !newS.has(x));
         if (!coveredByRic && lostOld.length && missingNew.length && /order new|map collect|permissioning/i.test(types)) {
-          addAction(n, 'Check entitlement', `${lostOld.join(', ')} is being replaced by ${missingNew.join(' or ')} for some content. Check whether these users need the new service. Load DACS usage to see exactly which RICs.`, login, null, { groupKey: `pdp:${lostOld.join(',')}>${missingNew.join(',')}`, costCodes: missingNew, costMaybe: true });
+          addAction(n, 'Check entitlement', `These users hold ${lostOld.join(', ')}, which will no longer cover some of this notice's content: it moves to ${missingNew.join(' or ')}, which they don't hold. ${lsegUsage.length ? 'None of the affected RICs appear in your usage file, so this is only needed if they use that content in ways DACS usage doesn\'t show (applications, non-display, other sites). If so, order ' + missingNew.join(' or ') + '; if not, no action.' : 'Check whether they use any RIC in this notice\'s list; if they do, order ' + missingNew.join(' or ') + '. Add your DACS usage file to check automatically.'}`, login, null, { groupKey: `pdp:${lostOld.join(',')}>${missingNew.join(',')}`, costCodes: missingNew, costMaybe: true });
         }
       }
     }
@@ -224,7 +224,7 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
           text = `Content moves from ${holdsOld.map(nm).join(', ')} to ${holdsNew.map(nm).join(', ')}, which these users already hold.`;
         } else if (/entitlement/i.test(cat)) {
           category = 'Check entitlement'; key = 'entitlement';
-          text = `Entitlement change for ${touched.map(nm).join(', ')}${act ? ` (${act})` : ''}. Check what these users need.`;
+          text = `Bloomberg is changing the entitlement for ${touched.map(nm).join(', ')}, which these users hold${act ? ` (Bloomberg asks: ${act})` : ''}.${newE.length ? ` The notice lists ${newE.map(nm).join(', ')} as the EID${newE.length === 1 ? '' : 's'} after the change${oldE.length ? `, replacing ${oldE.map(nm).join(', ')}` : ''}.` : ''} Check each user still holds the EIDs they need once it takes effect, and order any they're missing.`;
         } else if (/symbology|discontinu/i.test(cat)) {
           category = 'Update tickers'; key = 'symbology';
           text = `Tickers under ${touched.map(nm).join(', ')} are being replaced or discontinued. Review subscriptions and move to the replacement tickers.`;
@@ -322,16 +322,18 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
 /** Rows for the Excel download (one array of objects per sheet). */
 export function reportSheets(report, people) {
   const name = l => people.get(l)?.name || l;
+  const who = l => { const n = people.get(l)?.name; return n && n !== l ? `${n} (${l})` : l; };
   return {
     Actions: report.actions.map(a => ({ Priority: a.severity === 1 ? 'Urgent' : a.severity === 2 ? 'Review' : 'Info', Notice: a.ref, Title: a.title,
       Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Action: a.category, 'What to do': a.text,
-      Vendor: a.vendor || '', Users: a.site ? 'All B-PIPE users' : a.users.map(name).join('; '), 'User count': a.users.length,
+      Vendor: a.vendor || '', Users: a.site ? 'All B-PIPE users' : a.users.map(who).join('; '), 'User count': a.users.length,
       'Cost per user (GBP/month)': a.cost_per_user_gbp != null ? Math.round(a.cost_per_user_gbp * 100) / 100 : '',
       'Est. monthly cost (GBP)': a.cost_month_gbp != null ? Math.round(a.cost_month_gbp * 100) / 100 : '', 'Cost note': a.cost_note || '', RICs: a.rics.slice(0, 50).join(' '), 'RIC count': a.rics.length })),
     'By user': report.users.flatMap(u => u.actions.map(a => ({ Login: u.login, Name: u.name, 'Cost centre': u.cost_centre, Email: u.email,
-      Notice: a.ref, Effective: a.effective_date || '', Action: a.category, 'What to do': a.text }))),
+      Notice: a.ref, Title: a.title, Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Priority: a.severity === 1 ? 'Urgent' : a.severity === 2 ? 'Review' : 'Info', Action: a.category, 'Changes needed': a.text, 'Cost note': a.cost_note || '',
+      [a.vendor === 'Bloomberg' ? 'Tickers' : 'RICs']: report.ricDetail.filter(d => d.login === u.login && d.ref === a.ref).map(d => d.ric).slice(0, 50).join(' ') }))),
     'By notice': report.notices.map(n => ({ Notice: n.ref, Title: n.title, Effective: n.effective_date || '', 'Change types': (n.change_types || []).join(', '),
-      Users: n.users.length, RICs: n.rics.length, Actions: n.actions.map(a => a.category).join(', '), Summary: n.summary || '' })),
+      Users: n.users.length, RICs: n.rics.length, Actions: n.actions.map(a => `${a.category} (${a.site ? 'all B-PIPE users' : a.users.length + ' users'}): ${a.text}`).join('\n'), Summary: n.summary || '' })),
     'RIC detail': report.ricDetail.map(r => ({ Notice: r.ref, Effective: r.effective_date || '', Login: r.login, Name: name(r.login), RIC: r.ric,
       'Matched on': r.via === 'chain' ? `chain of ${r.matched_code}` : r.via === 'eid' ? `EID ${r.matched_code}` : r.matched_code, 'RIC name': r.ric_name, Change: r.change, 'New RIC': r.new_code,
       'PDP removed': r.pdp_removed, 'PDP added': r.pdp_added, 'New PDPs': r.new_pdps, Access: r.access, Action: r.action })),

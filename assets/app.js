@@ -148,21 +148,38 @@ function reportHtml(r) {
   const s = r.stats; const t = S.tab;
   const tabs = [['actions', `Actions (${s.actions})`], ['users', `By user (${s.users_affected})`], ['notices', `By notice (${s.notices_affecting})`], ['rics', `RIC and ticker detail (${r.ricDetail.length})`]];
   let body = '';
+  const personName = l => r.people.get(l)?.name || '';
+  const personChip = l => { const nm = personName(l); return `<span class="chip" style="margin:0 4px 4px 0">${nm && nm !== l ? `${esc(nm)} <span class="mono muted">(${esc(l)})</span>` : `<span class="mono">${esc(l)}</span>`}</span>`; };
+  const userCodes = new Map();
+  for (const d of r.ricDetail) { const k = d.login + '|' + d.ref; if (!userCodes.has(k)) userCodes.set(k, new Set()); userCodes.get(k).add(d.ric); }
+  const dueHtml = a => a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : a.due_date ? 'by ' + fmtDate(a.due_date) : '';
+  const changeBlock = (a, login, inNotice) => {
+    const mine = login ? a.rics.filter(c => userCodes.get(login + '|' + a.ref)?.has(c)) : a.rics;
+    const unit = a.vendor === 'Bloomberg' ? 'ticker' : 'RIC';
+    const due = dueHtml(a);
+    return `<div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line, #e5e7eb)">
+      <div>${sevPill(a.severity)} <span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span> <b>${esc(a.category)}</b>${due ? ` <span style="font-size:12px">· ${due}</span>` : ''}</div>
+      ${inNotice ? '' : `<div class="muted" style="font-size:12px;margin:2px 0">${esc(a.title)}</div>`}
+      <div style="font-size:13px">${esc(a.text)}</div>
+      ${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:2px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}
+      ${mine.length ? `<details style="margin-top:2px"><summary style="font-size:12px">${num(mine.length)} ${unit}${mine.length === 1 ? '' : 's'} affected</summary><div class="mono" style="font-size:12px;margin-top:4px">${mine.slice(0, 200).map(esc).join(' ')}${mine.length > 200 ? ' …' : ''}</div></details>` : ''}
+    </div>`;
+  };
   if (t === 'actions') body = r.actions.length ? `<div class="tbl-wrap"><table><thead><tr><th>Priority</th><th>Notice</th><th>Action</th><th>Users</th><th>Due</th></tr></thead><tbody>
     ${r.actions.map((a, i) => `<tr><td>${sevPill(a.severity)}</td>
       <td style="min-width:200px"><span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span><br><span class="muted" style="font-size:12px">${esc(a.title)}</span></td>
       <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:4px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
-      <td style="min-width:180px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.user_names.slice(0, 6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.user_names.slice(6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}</details>` : ''}</td>
+      <td style="min-width:200px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.users.slice(0, 6).map(personChip).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.users.slice(6).map(personChip).join('')}</details>` : ''}</td>
       <td style="white-space:nowrap">${a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : fmtDate(a.due_date)}<br><span class="muted" style="font-size:12px">effective ${fmtDate(a.effective_date)}</span></td></tr>`).join('')}
     </tbody></table></div>` : '<p class="empty">No actions. None of this library\'s notices affect the users or RICs in your files.</p>';
-  if (t === 'users') body = `<div class="tbl-wrap"><table><thead><tr><th>User or application</th><th>Cost centre</th><th>What to do</th><th class="num">RICs</th></tr></thead><tbody>
-    ${r.users.map(u => `<tr><td style="min-width:180px"><b>${esc(u.name || u.login)}</b><br><span class="mono muted" style="font-size:12px">${esc(u.login)}${u.email ? ' · ' + esc(u.email) : ''}</span></td>
-      <td class="mono">${esc(u.cost_centre || '—')}</td>
-      <td style="min-width:320px">${u.actions.map(a => `<div style="margin-bottom:4px">${sevPill(a.severity)} <span class="mono">${esc(a.ref)}</span> <b>${esc(a.category)}</b></div>`).join('')}</td>
-      <td class="num mono">${num(u.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
+  if (t === 'users') body = `<div class="tbl-wrap"><table><thead><tr><th>User or application</th><th>Cost centre</th><th>Changes needed</th><th class="num">RICs</th></tr></thead><tbody>
+    ${r.users.map(u => `<tr><td style="min-width:180px;vertical-align:top"><b>${esc(u.name || u.login)}</b><br><span class="mono muted" style="font-size:12px">${esc(u.login)}${u.email ? ' · ' + esc(u.email) : ''}</span></td>
+      <td class="mono" style="vertical-align:top">${esc(u.cost_centre || '—')}</td>
+      <td style="min-width:420px">${u.actions.map(a => changeBlock(a, u.login)).join('')}</td>
+      <td class="num mono" style="vertical-align:top">${num(u.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'notices') body = `<div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Effective</th><th>Actions</th><th class="num">Users</th><th class="num">RICs</th></tr></thead><tbody>
     ${r.notices.map(n => `<tr><td style="min-width:260px"><span class="chip vendor">${esc(n.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(n.ref)}</span> ${sevPill(n.top)}<br>${esc(n.title)}${n.summary ? `<details><summary style="font-size:12px">Summary</summary><div style="font-size:13px;margin-top:4px">${esc(n.summary)}</div></details>` : ''}</td>
-      <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td>${[...new Set(n.actions.map(a => a.category))].map(c => `<span class="chip" style="margin:0 4px 4px 0">${esc(c)}</span>`).join('')}</td>
+      <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td style="min-width:380px">${n.actions.map(a => changeBlock(a, null, true).replace('</b>', `</b> <span class="muted" style="font-size:12px">· ${a.site ? 'all B-PIPE users' : `${a.users.length} user${a.users.length === 1 ? '' : 's'}`}</span>`)).join('')}</td>
       <td class="num mono">${n.users.length}</td><td class="num mono">${num(n.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'rics') body = r.ricDetail.length ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>User</th><th>Notice</th><th>Change</th><th>PDPs</th><th>Access</th></tr></thead><tbody>
     ${r.ricDetail.slice(0, 2000).map(d => `<tr><td class="mono">${esc(d.ric)}${d.via === 'chain' ? `<br><span class="muted" style="font-size:11px">chain of ${esc(d.matched_code)}</span>` : d.via === 'eid' ? `<br><span class="muted" style="font-size:11px">${esc(d.ric_name)}</span>` : ''}${d.new_code ? `<br>→ ${esc(d.new_code)}` : ''}</td>
