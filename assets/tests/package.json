@@ -1,0 +1,13 @@
+{
+  "name": "notice-desk-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx parsers.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "4.19.2",
+    "xlsx": "0.18.5",
+    "pg": "8.13.1"
+  }
+}

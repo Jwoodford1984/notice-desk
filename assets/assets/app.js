@@ -4,9 +4,11 @@
 //   Clients       (CJC IT admins):       client organisations and their users.
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
-import { decode, parseSource, parseChangeSummary, parseBbgReport, isBbgReport } from './dacs-parsers.js';
+import { decode, parseSource, parseChangeSummary, parseBbgReport, isBbgReport, parseLsegPriceList, isPriceWorkbook } from './dacs-parsers.js';
 import { buildReport, vendorUsageCodes, reportSheets, isBpipeRow } from './impact.js';
 import { loadIntoLibrary, refFromFileName, isSummaryFileName, vendorFromRef } from './library.js';
+const isPriceFileName = n => /price/i.test(n);
+const gbp = v => '£' + Number(v || 0).toLocaleString('en-GB', { maximumFractionDigits: 0 });
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -146,21 +148,38 @@ function reportHtml(r) {
   const s = r.stats; const t = S.tab;
   const tabs = [['actions', `Actions (${s.actions})`], ['users', `By user (${s.users_affected})`], ['notices', `By notice (${s.notices_affecting})`], ['rics', `RIC and ticker detail (${r.ricDetail.length})`]];
   let body = '';
+  const personName = l => r.people.get(l)?.name || '';
+  const personChip = l => { const nm = personName(l); return `<span class="chip" style="margin:0 4px 4px 0">${nm && nm !== l ? `${esc(nm)} <span class="mono muted">(${esc(l)})</span>` : `<span class="mono">${esc(l)}</span>`}</span>`; };
+  const userCodes = new Map();
+  for (const d of r.ricDetail) { const k = d.login + '|' + d.ref; if (!userCodes.has(k)) userCodes.set(k, new Set()); userCodes.get(k).add(d.ric); }
+  const dueHtml = a => a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : a.due_date ? 'by ' + fmtDate(a.due_date) : '';
+  const changeBlock = (a, login, inNotice) => {
+    const mine = login ? a.rics.filter(c => userCodes.get(login + '|' + a.ref)?.has(c)) : a.rics;
+    const unit = a.vendor === 'Bloomberg' ? 'ticker' : 'RIC';
+    const due = dueHtml(a);
+    return `<div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line, #e5e7eb)">
+      <div>${sevPill(a.severity)} <span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span> <b>${esc(a.category)}</b>${due ? ` <span style="font-size:12px">· ${due}</span>` : ''}</div>
+      ${inNotice ? '' : `<div class="muted" style="font-size:12px;margin:2px 0">${esc(a.title)}</div>`}
+      <div style="font-size:13px">${esc(a.text)}</div>
+      ${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:2px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}
+      ${mine.length ? `<details style="margin-top:2px"><summary style="font-size:12px">${num(mine.length)} ${unit}${mine.length === 1 ? '' : 's'} affected</summary><div class="mono" style="font-size:12px;margin-top:4px">${mine.slice(0, 200).map(esc).join(' ')}${mine.length > 200 ? ' …' : ''}</div></details>` : ''}
+    </div>`;
+  };
   if (t === 'actions') body = r.actions.length ? `<div class="tbl-wrap"><table><thead><tr><th>Priority</th><th>Notice</th><th>Action</th><th>Users</th><th>Due</th></tr></thead><tbody>
     ${r.actions.map((a, i) => `<tr><td>${sevPill(a.severity)}</td>
       <td style="min-width:200px"><span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span><br><span class="muted" style="font-size:12px">${esc(a.title)}</span></td>
-      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
-      <td style="min-width:180px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.user_names.slice(0, 6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.user_names.slice(6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}</details>` : ''}</td>
+      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:4px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
+      <td style="min-width:200px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.users.slice(0, 6).map(personChip).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.users.slice(6).map(personChip).join('')}</details>` : ''}</td>
       <td style="white-space:nowrap">${a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : fmtDate(a.due_date)}<br><span class="muted" style="font-size:12px">effective ${fmtDate(a.effective_date)}</span></td></tr>`).join('')}
     </tbody></table></div>` : '<p class="empty">No actions. None of this library\'s notices affect the users or RICs in your files.</p>';
-  if (t === 'users') body = `<div class="tbl-wrap"><table><thead><tr><th>User or application</th><th>Cost centre</th><th>What to do</th><th class="num">RICs</th></tr></thead><tbody>
-    ${r.users.map(u => `<tr><td style="min-width:180px"><b>${esc(u.name || u.login)}</b><br><span class="mono muted" style="font-size:12px">${esc(u.login)}${u.email ? ' · ' + esc(u.email) : ''}</span></td>
-      <td class="mono">${esc(u.cost_centre || '—')}</td>
-      <td style="min-width:320px">${u.actions.map(a => `<div style="margin-bottom:4px">${sevPill(a.severity)} <span class="mono">${esc(a.ref)}</span> <b>${esc(a.category)}</b></div>`).join('')}</td>
-      <td class="num mono">${num(u.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
+  if (t === 'users') body = `<div class="tbl-wrap"><table><thead><tr><th>User or application</th><th>Cost centre</th><th>Changes needed</th><th class="num">RICs</th></tr></thead><tbody>
+    ${r.users.map(u => `<tr><td style="min-width:180px;vertical-align:top"><b>${esc(u.name || u.login)}</b><br><span class="mono muted" style="font-size:12px">${esc(u.login)}${u.email ? ' · ' + esc(u.email) : ''}</span></td>
+      <td class="mono" style="vertical-align:top">${esc(u.cost_centre || '—')}</td>
+      <td style="min-width:420px">${u.actions.map(a => changeBlock(a, u.login)).join('')}</td>
+      <td class="num mono" style="vertical-align:top">${num(u.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'notices') body = `<div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Effective</th><th>Actions</th><th class="num">Users</th><th class="num">RICs</th></tr></thead><tbody>
     ${r.notices.map(n => `<tr><td style="min-width:260px"><span class="chip vendor">${esc(n.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(n.ref)}</span> ${sevPill(n.top)}<br>${esc(n.title)}${n.summary ? `<details><summary style="font-size:12px">Summary</summary><div style="font-size:13px;margin-top:4px">${esc(n.summary)}</div></details>` : ''}</td>
-      <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td>${[...new Set(n.actions.map(a => a.category))].map(c => `<span class="chip" style="margin:0 4px 4px 0">${esc(c)}</span>`).join('')}</td>
+      <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td style="min-width:380px">${n.actions.map(a => changeBlock(a, null, true).replace('</b>', `</b> <span class="muted" style="font-size:12px">· ${a.site ? 'all B-PIPE users' : `${a.users.length} user${a.users.length === 1 ? '' : 's'}`}</span>`)).join('')}</td>
       <td class="num mono">${n.users.length}</td><td class="num mono">${num(n.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'rics') body = r.ricDetail.length ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>User</th><th>Notice</th><th>Change</th><th>PDPs</th><th>Access</th></tr></thead><tbody>
     ${r.ricDetail.slice(0, 2000).map(d => `<tr><td class="mono">${esc(d.ric)}${d.via === 'chain' ? `<br><span class="muted" style="font-size:11px">chain of ${esc(d.matched_code)}</span>` : d.via === 'eid' ? `<br><span class="muted" style="font-size:11px">${esc(d.ric_name)}</span>` : ''}${d.new_code ? `<br>→ ${esc(d.new_code)}` : ''}</td>
@@ -172,9 +191,9 @@ function reportHtml(r) {
   return `
   <div class="kpis">
     <div class="kpi ${s.urgent ? 'alert' : ''}"><span class="n">${s.urgent}</span><span class="l">Urgent actions</span></div>
-    <div class="kpi ${s.losing_access ? 'alert' : ''}"><span class="n">${s.losing_access}</span><span class="l">Users losing access</span></div>
-    <div class="kpi"><span class="n">${s.users_affected}</span><span class="l">Users and applications affected</span></div>
-    <div class="kpi"><span class="n">${s.notices_affecting}</span><span class="l">Notices affecting you, of ${s.notices_checked}</span></div>
+    <div class="kpi ${s.urgent_users_lseg + s.urgent_users_bbg ? 'alert' : ''}"><span class="n">${s.urgent_users_lseg + s.urgent_users_bbg}</span><span class="l">Users needing urgent action<br><span class="muted" style="font-size:12px">${s.urgent_users_lseg} LSEG · ${s.urgent_users_bbg} Bloomberg</span></span></div>
+    <div class="kpi"><span class="n">${s.priced ? gbp(s.urgent_cost_gbp) : '—'}</span><span class="l">Est. monthly cost of urgent actions<br><span class="muted" style="font-size:12px">${s.priced ? `price changes ${s.price_change_gbp >= 0 ? '+' : '−'}${gbp(Math.abs(s.price_change_gbp))} a month` : 'no price list in the library'}</span></span></div>
+    <div class="kpi"><span class="n">${s.review_users}</span><span class="l">Users with items to review<br><span class="muted" style="font-size:12px">${s.notices_affecting} of ${s.notices_checked} notices affect you</span></span></div>
   </div>
   <section class="panel">
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${t === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
@@ -202,14 +221,15 @@ async function runCheck() {
   try {
     const usage = S.files.filter(f => f.kind === 'usage').flatMap(f => f.rows);
     const perms = S.files.filter(f => f.kind === 'perms').flatMap(f => f.rows);
-    const [notices, changes] = await Promise.all([
+    const [notices, changes, prices] = await Promise.all([
       all(() => sb.from('lib_notices').select('id, ref, vendor, title, change_types, effective_date, summary, vendor_status, action_required').order('id')),
       all(() => sb.from('lib_service_changes').select('notice_id, old_pdp, new_pdp, old_pe, new_pe, old_price, new_price').order('id')),
+      all(() => sb.from('lib_prices').select('vendor, pdp, service_name, billed_by, user_charge, currency, site_licence, price_gbp').order('pdp')),
     ]);
     const codes = vendorUsageCodes(usage);
     const match = async vendor => { const out = []; for (let i = 0; i < codes[vendor].length; i += 2000) out.push(...await rpc('lib_match_codes', { p_vendor: vendor, p_codes: codes[vendor].slice(i, i + 2000) })); return out; };
     const [matches, bbgMatches] = await Promise.all([match('LSEG'), match('Bloomberg')]);
-    S.report = buildReport({ usage, perms, notices, changes, matches, bbgMatches, today: todayIso() });
+    S.report = buildReport({ usage, perms, notices, changes, matches, bbgMatches, prices: prices.map(p => ({ ...p, user_charge: p.user_charge == null ? null : Number(p.user_charge), site_licence: p.site_licence == null ? null : Number(p.site_licence), price_gbp: p.price_gbp == null ? null : Number(p.price_gbp) })), today: todayIso() });
     S.tab = 'actions';
   } catch (e) { toast(e.message); }
   route();
@@ -224,7 +244,11 @@ function downloadReport() {
 
 /* ================================================================ LIBRARY */
 async function vLibrary() {
-  const lib = await all(() => sb.from('lib_overview').select('*').order('effective_date', { ascending: true, nullsFirst: false }).order('ref'));
+  const [lib, priceCount, priceQ] = await Promise.all([
+    all(() => sb.from('lib_overview').select('*').order('effective_date', { ascending: true, nullsFirst: false }).order('ref')),
+    sb.from('lib_prices').select('pdp', { count: 'exact', head: true }).then(r => r.count || 0),
+    q(sb.from('lib_prices').select('quarter').limit(1)),
+  ]);
   const withFile = lib.filter(n => n.file_id).length; const rows = lib.reduce((a, n) => a + (n.stored_rows || 0), 0);
   const noSummary = lib.filter(n => n.title === n.ref).length;
   return `
@@ -245,6 +269,7 @@ async function vLibrary() {
     <div class="kpi"><span class="n">${num(rows)}</span><span class="l">Instrument rows</span></div>
     <div class="kpi ${noSummary ? 'alert' : ''}"><span class="n">${noSummary}</span><span class="l">Files without a summary row</span></div>
   </div>
+  <div class="banner ${priceCount ? 'info' : ''}">${priceCount ? `<b>Price list:</b> ${num(priceCount)} LSEG PDP prices${priceQ[0]?.quarter ? ` (${esc(priceQ[0].quarter)})` : ''}, used for cost estimates in client reports.` : '<b>No price list yet.</b> Drop LSEG\'s quarterly Exchange Prices workbook above to add cost estimates to client reports.'}</div>
   <div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Quarter</th><th>Effective</th><th>Change types</th><th class="num">Service changes</th><th>RIC list</th></tr></thead><tbody>
   ${lib.length ? lib.map(n => `<tr><td style="min-width:260px"><span class="chip vendor">${esc(n.vendor)}</span> <span class="mono">${esc(n.ref)}</span><br>${n.title === n.ref ? '<span class="muted">No summary row yet</span>' : esc(n.title)}</td>
     <td>${esc(n.quarter || '')}</td><td style="white-space:nowrap">${fmtDate(n.effective_date)}</td>
@@ -272,16 +297,22 @@ function readInWorker(buffer, vendor, job) {
 let queueRunning = false;
 async function addLibraryFiles(files) {
   const vendor = $('#lib-vendor').value; const quarter = $('#lib-quarter').value.trim(); store.set('nd.quarter', quarter);
-  const jobs = [...files].map(file => { const summary = isSummaryFileName(file.name); const ref = summary ? 'Summary' : refFromFileName(file.name);
-    return { file, vendor: summary ? vendor : (vendorFromRef(ref) || vendor), quarter, summary, ref, state: 'queued', msg: 'Waiting' }; });
-  jobs.sort((a, b) => b.summary - a.summary); // summary first, so notices get their titles
+  const jobs = [...files].map(file => { const price = isPriceFileName(file.name); const summary = !price && isSummaryFileName(file.name); const ref = price ? 'Price list' : summary ? 'Summary' : refFromFileName(file.name);
+    return { file, vendor: summary || price ? vendor : (vendorFromRef(ref) || vendor), quarter, summary, price, ref, state: 'queued', msg: 'Waiting' }; });
+  jobs.sort((a, b) => (b.summary + b.price) - (a.summary + a.price)); // summaries and prices first, so notices get their titles
   S.queue.push(...jobs); refreshQueue();
   if (queueRunning) return; queueRunning = true;
   try {
     for (const job of S.queue.filter(j => j.state === 'queued')) {
       job.state = 'working'; job.msg = 'Reading…'; refreshQueue();
       try {
-        if (job.summary) {
+        if (job.price) {
+          const wb = XLSX.read(new Uint8Array(await job.file.arrayBuffer()), { type: 'array' });
+          if (!isPriceWorkbook(wb.SheetNames)) throw new Error('Not an LSEG Exchange Prices workbook (no "Exchange PDP Pricing" sheet).');
+          const p = parseLsegPriceList(wb.SheetNames.map(name => ({ name, aoa: XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: '', raw: true }) })));
+          const n = await rpc('lib_import_prices', { p_vendor: 'LSEG', p_quarter: job.quarter, p_rows: p.rows });
+          job.vendor = 'LSEG'; job.msg = `${num(n)} LSEG PDP prices loaded${p.warnings.length ? ` · ${p.warnings[0]}` : ''}`;
+        } else if (job.summary) {
           const wb = XLSX.read(new Uint8Array(await job.file.arrayBuffer()), { type: 'array', cellDates: true });
           const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
           const bbg = isBbgReport(aoa);
