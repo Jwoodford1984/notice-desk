@@ -4,9 +4,9 @@
 //   Clients       (CJC IT admins):       client organisations and their users.
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
-import { decode, parseSource, parseChangeSummary } from './dacs-parsers.js';
-import { buildReport, usageCodes, reportSheets } from './impact.js';
-import { loadIntoLibrary, refFromFileName, isSummaryFileName } from './library.js';
+import { decode, parseSource, parseChangeSummary, parseBbgReport, isBbgReport } from './dacs-parsers.js';
+import { buildReport, vendorUsageCodes, reportSheets, isBpipeRow } from './impact.js';
+import { loadIntoLibrary, refFromFileName, isSummaryFileName, vendorFromRef } from './library.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -37,7 +37,7 @@ const SEV = { 1: ['Urgent', 'p-match'], 2: ['Review', 'p-review'], 3: ['Info', '
 const sevPill = s => `<span class="pill ${SEV[s][1]}">${SEV[s][0]}</span>`;
 
 /* ------------------------------------------------------------------ state */
-const S = { session: null, isAdmin: false, clients: [], files: { usage: null, perms: null }, report: null, tab: 'actions', queue: [] };
+const S = { session: null, isAdmin: false, clients: [], files: [], report: null, tab: 'actions', queue: [] };
 
 /* ------------------------------------------------------------------- boot */
 sb.auth.onAuthStateChange((event, session) => {
@@ -120,33 +120,37 @@ async function route() {
 
 /* =========================================================== CHECK IMPACT */
 async function vCheck() {
-  const f = S.files; const r = S.report;
-  const fileChip = (kind, label) => f[kind] ? `<div class="banner info" style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
-      <span><b>${label}:</b> ${esc(f[kind].name)} · ${num(f[kind].rows.length)} rows${f[kind].meta?.period ? ` · ${esc(f[kind].meta.period)}` : ''}</span>
-      <button class="btn small" data-remove="${kind}">Remove</button></div>` : '';
+  const r = S.report;
+  const hasUsage = S.files.some(f => f.kind === 'usage'), hasPerms = S.files.some(f => f.kind === 'perms');
+  const fileChips = S.files.map((f, i) => {
+    const bp = f.rows.filter(isBpipeRow).length;
+    const split = bp && bp < f.rows.length ? ` (${num(f.rows.length - bp)} LSEG, ${num(bp)} B-PIPE)` : bp ? ' (B-PIPE)' : '';
+    return `<div class="banner info" style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+      <span><b>${f.kind === 'usage' ? 'Usage' : 'Permissions'}:</b> ${esc(f.name)} · ${num(f.rows.length)} rows${split}${f.meta?.period ? ` · ${esc(f.meta.period)}` : ''}</span>
+      <button class="btn small" data-remove="${i}">Remove</button></div>`; }).join('');
   return `
   <div class="head"><div><h1>Check your impact</h1>
-    <p class="sub">Drop your DACS <b>Usage Detail by User</b> and/or <b>Active Permission by Exchange</b> exports. Notice Desk checks them against every notice in the CJC IT library and lists who is affected and what to do.</p></div>
+    <p class="sub">Drop your DACS <b>Usage Detail by User</b> and/or <b>Active Permission by Exchange</b> exports, including Bloomberg B-PIPE services managed in DACS. Notice Desk checks them against every LSEG and Bloomberg notice in the CJC IT library and lists who is affected and what to do.</p></div>
     ${r ? '<div class="row"><button class="btn" data-act="download">Download Excel</button><button class="btn" data-act="reset">Start again</button></div>' : ''}</div>
   <section class="panel">
     <div class="drop" data-drop="dacs"><b>Drop your DACS files here</b>
-      <span class="muted">CSV exports straight from DACS. You can drop both files together.</span>
+      <span class="muted">CSV exports straight from DACS. Drop several at once: usage and permissions, LSEG and B-PIPE.</span>
       <div class="row" style="justify-content:center"><label class="btn primary" for="dacsfile">Choose files</label><input type="file" id="dacsfile" accept=".csv,.txt" multiple hidden></div></div>
-    ${fileChip('usage', 'Usage')}${fileChip('perms', 'Permissions')}
-    <p class="muted" style="margin:0;font-size:12px">Your files are read in this browser and aren't uploaded or stored. Only RIC and service codes are sent to check against the library. ${!f.usage ? 'Add the usage file to see exactly which RICs and users are hit. ' : ''}${!f.perms ? 'Add the permission file to check whether users keep access and to see price and policy changes.' : ''}</p>
+    ${fileChips}
+    <p class="muted" style="margin:0;font-size:12px">Your files are read in this browser and aren't uploaded or stored. Only RIC and ticker codes are sent to check against the library. ${!hasUsage ? 'Add a usage file to see exactly which RICs, tickers and users are hit. ' : ''}${!hasPerms ? 'Add a permission file to check whether users keep access and to see price, policy and entitlement changes.' : ''}</p>
   </section>
   ${r ? reportHtml(r) : ''}`;
 }
 
 function reportHtml(r) {
   const s = r.stats; const t = S.tab;
-  const tabs = [['actions', `Actions (${s.actions})`], ['users', `By user (${s.users_affected})`], ['notices', `By notice (${s.notices_affecting})`], ['rics', `RIC detail (${r.ricDetail.length})`]];
+  const tabs = [['actions', `Actions (${s.actions})`], ['users', `By user (${s.users_affected})`], ['notices', `By notice (${s.notices_affecting})`], ['rics', `RIC and ticker detail (${r.ricDetail.length})`]];
   let body = '';
   if (t === 'actions') body = r.actions.length ? `<div class="tbl-wrap"><table><thead><tr><th>Priority</th><th>Notice</th><th>Action</th><th>Users</th><th>Due</th></tr></thead><tbody>
     ${r.actions.map((a, i) => `<tr><td>${sevPill(a.severity)}</td>
-      <td style="min-width:200px"><span class="mono">${esc(a.ref)}</span><br><span class="muted" style="font-size:12px">${esc(a.title)}</span></td>
-      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} RIC${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
-      <td style="min-width:180px">${a.user_names.slice(0, 6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.user_names.slice(6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}</details>` : ''}</td>
+      <td style="min-width:200px"><span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span><br><span class="muted" style="font-size:12px">${esc(a.title)}</span></td>
+      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
+      <td style="min-width:180px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.user_names.slice(0, 6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.user_names.slice(6).map(n => `<span class="chip" style="margin:0 4px 4px 0">${esc(n)}</span>`).join('')}</details>` : ''}</td>
       <td style="white-space:nowrap">${a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : fmtDate(a.due_date)}<br><span class="muted" style="font-size:12px">effective ${fmtDate(a.effective_date)}</span></td></tr>`).join('')}
     </tbody></table></div>` : '<p class="empty">No actions. None of this library\'s notices affect the users or RICs in your files.</p>';
   if (t === 'users') body = `<div class="tbl-wrap"><table><thead><tr><th>User or application</th><th>Cost centre</th><th>What to do</th><th class="num">RICs</th></tr></thead><tbody>
@@ -155,16 +159,16 @@ function reportHtml(r) {
       <td style="min-width:320px">${u.actions.map(a => `<div style="margin-bottom:4px">${sevPill(a.severity)} <span class="mono">${esc(a.ref)}</span> <b>${esc(a.category)}</b></div>`).join('')}</td>
       <td class="num mono">${num(u.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'notices') body = `<div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Effective</th><th>Actions</th><th class="num">Users</th><th class="num">RICs</th></tr></thead><tbody>
-    ${r.notices.map(n => `<tr><td style="min-width:260px"><span class="mono">${esc(n.ref)}</span> ${sevPill(n.top)}<br>${esc(n.title)}${n.summary ? `<details><summary style="font-size:12px">Summary</summary><div style="font-size:13px;margin-top:4px">${esc(n.summary)}</div></details>` : ''}</td>
+    ${r.notices.map(n => `<tr><td style="min-width:260px"><span class="chip vendor">${esc(n.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(n.ref)}</span> ${sevPill(n.top)}<br>${esc(n.title)}${n.summary ? `<details><summary style="font-size:12px">Summary</summary><div style="font-size:13px;margin-top:4px">${esc(n.summary)}</div></details>` : ''}</td>
       <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td>${[...new Set(n.actions.map(a => a.category))].map(c => `<span class="chip" style="margin:0 4px 4px 0">${esc(c)}</span>`).join('')}</td>
       <td class="num mono">${n.users.length}</td><td class="num mono">${num(n.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
   if (t === 'rics') body = r.ricDetail.length ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>User</th><th>Notice</th><th>Change</th><th>PDPs</th><th>Access</th></tr></thead><tbody>
-    ${r.ricDetail.slice(0, 2000).map(d => `<tr><td class="mono">${esc(d.ric)}${d.via === 'chain' ? `<br><span class="muted" style="font-size:11px">chain of ${esc(d.matched_code)}</span>` : ''}${d.new_code ? `<br>→ ${esc(d.new_code)}` : ''}</td>
+    ${r.ricDetail.slice(0, 2000).map(d => `<tr><td class="mono">${esc(d.ric)}${d.via === 'chain' ? `<br><span class="muted" style="font-size:11px">chain of ${esc(d.matched_code)}</span>` : d.via === 'eid' ? `<br><span class="muted" style="font-size:11px">${esc(d.ric_name)}</span>` : ''}${d.new_code ? `<br>→ ${esc(d.new_code)}` : ''}</td>
       <td>${esc(r.people.get(d.login)?.name || d.login)}</td><td class="mono">${esc(d.ref)}</td><td>${esc(d.change)}</td>
       <td class="mono" style="font-size:12px">${d.pdp_removed ? `<span class="tag-used">−${esc(d.pdp_removed)}</span> ` : ''}${d.pdp_added ? `<span style="color:var(--ok);font-weight:600">+${esc(d.pdp_added)}</span>` : ''}${!d.pdp_removed && !d.pdp_added ? '—' : ''}</td>
       <td>${d.access === 'loses' ? '<span class="tag-used">Loses access</span>' : d.access === 'keeps' ? 'Keeps access' : `<span class="muted">${esc(d.access)}</span>`}</td></tr>`).join('')}
     </tbody></table></div>${r.ricDetail.length > 2000 ? '<p class="muted">Showing the first 2,000 rows. The Excel download has them all.</p>' : ''}`
-    : `<p class="empty">${S.files.usage ? 'None of your RICs appear in the library\'s notice files.' : 'Add your DACS usage file to see RIC-level detail.'}</p>`;
+    : `<p class="empty">${S.files.some(f => f.kind === 'usage') ? 'None of your RICs or tickers appear in the library\'s notices.' : 'Add your DACS usage file to see RIC and ticker detail.'}</p>`;
   return `
   <div class="kpis">
     <div class="kpi ${s.urgent ? 'alert' : ''}"><span class="n">${s.urgent}</span><span class="l">Urgent actions</span></div>
@@ -175,7 +179,7 @@ function reportHtml(r) {
   <section class="panel">
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${t === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
     ${body}
-    <p class="muted" style="margin:0;font-size:12px">Checked ${num(s.codes_checked)} RICs from ${num(s.usage_rows)} usage rows and ${num(s.perm_rows)} permission rows against ${s.notices_checked} notices on ${fmtDate(todayIso())}. Due dates are 5 days before each change takes effect.</p>
+    <p class="muted" style="margin:0;font-size:12px">Checked ${num(s.codes_checked)} RICs and tickers from ${num(s.usage_rows)} usage rows and ${num(s.perm_rows)} permission rows (${num(s.bpipe_logins)} B-PIPE logins) against ${s.notices_checked} notices on ${fmtDate(todayIso())}. Due dates are 5 days before each change takes effect.</p>
   </section>`;
 }
 
@@ -184,26 +188,28 @@ async function addDacsFiles(files) {
     try {
       const { text, encoding } = decode(new Uint8Array(await file.arrayBuffer()));
       const p = parseSource(text, encoding);
-      if (p.kind === 'lseg_usage') S.files.usage = { name: file.name, rows: p.rows, meta: p.meta };
-      else if (p.kind === 'lseg_permissions') S.files.perms = { name: file.name, rows: p.rows, meta: p.meta };
-      else throw new Error(`${file.name} looks like a Bloomberg usage file. Bloomberg checks are coming soon.`);
+      if (p.kind === 'lseg_usage' || p.kind === 'lseg_permissions') {
+        S.files = S.files.filter(f => f.name !== file.name);
+        S.files.push({ name: file.name, kind: p.kind === 'lseg_usage' ? 'usage' : 'perms', rows: p.rows, meta: p.meta });
+      } else throw new Error('This isn\'t a DACS Usage Detail by User or Active Permission by Exchange export.');
     } catch (e) { toast(`${file.name}: ${e.message}`); }
   }
   await runCheck();
 }
 async function runCheck() {
-  if (!S.files.usage && !S.files.perms) { S.report = null; return route(); }
+  if (!S.files.length) { S.report = null; return route(); }
   $('#view').insertAdjacentHTML('beforeend', '<p class="loading" id="running"><span class="spin"></span> Checking against the library…</p>');
   try {
-    const usage = S.files.usage?.rows || []; const perms = S.files.perms?.rows || [];
+    const usage = S.files.filter(f => f.kind === 'usage').flatMap(f => f.rows);
+    const perms = S.files.filter(f => f.kind === 'perms').flatMap(f => f.rows);
     const [notices, changes] = await Promise.all([
-      all(() => sb.from('lib_notices').select('id, ref, vendor, title, change_types, effective_date, summary').order('id')),
+      all(() => sb.from('lib_notices').select('id, ref, vendor, title, change_types, effective_date, summary, vendor_status, action_required').order('id')),
       all(() => sb.from('lib_service_changes').select('notice_id, old_pdp, new_pdp, old_pe, new_pe, old_price, new_price').order('id')),
     ]);
-    const codes = [...usageCodes(usage).keys()];
-    const matches = [];
-    for (let i = 0; i < codes.length; i += 2000) matches.push(...await rpc('lib_match_codes', { p_vendor: 'LSEG', p_codes: codes.slice(i, i + 2000) }));
-    S.report = buildReport({ usage, perms, notices, changes, matches, today: todayIso() });
+    const codes = vendorUsageCodes(usage);
+    const match = async vendor => { const out = []; for (let i = 0; i < codes[vendor].length; i += 2000) out.push(...await rpc('lib_match_codes', { p_vendor: vendor, p_codes: codes[vendor].slice(i, i + 2000) })); return out; };
+    const [matches, bbgMatches] = await Promise.all([match('LSEG'), match('Bloomberg')]);
+    S.report = buildReport({ usage, perms, notices, changes, matches, bbgMatches, today: todayIso() });
     S.tab = 'actions';
   } catch (e) { toast(e.message); }
   route();
@@ -222,10 +228,10 @@ async function vLibrary() {
   const withFile = lib.filter(n => n.file_id).length; const rows = lib.reduce((a, n) => a + (n.stored_rows || 0), 0);
   const noSummary = lib.filter(n => n.title === n.ref).length;
   return `
-  <div class="head"><div><h1>Notice library</h1><p class="sub">The notices and affected RIC lists every client is checked against. Drop the quarter's Quarterly Change Summary and the notice spreadsheets together; each spreadsheet is attached to its notice by the DN number in its file name.</p></div></div>
+  <div class="head"><div><h1>Notice library</h1><p class="sub">The notices and affected RIC and ticker lists every client is checked against. Drop the quarter's LSEG Quarterly Change Summary and DN spreadsheets, and the Bloomberg quarterly report and any ticker lists, all together. Summaries are recognised automatically, and each spreadsheet is attached to its notice by the DN number or Bloomberg Ref. ID in its file name.</p></div></div>
   <section class="panel">
     <div class="row">
-      <label class="row" style="gap:6px"><span class="muted">Vendor</span><select class="sel" id="lib-vendor"><option>LSEG</option><option>Bloomberg</option></select></label>
+      <label class="row" style="gap:6px"><span class="muted">Vendor for other files</span><select class="sel" id="lib-vendor"><option>LSEG</option><option>Bloomberg</option></select></label>
       <label class="row" style="gap:6px"><span class="muted">Quarter</span><input class="txt" id="lib-quarter" value="${esc(store.get('nd.quarter') || currentQuarter())}" style="width:110px"></label>
     </div>
     <div class="drop" data-drop="library"><b>Drop the summary and notice spreadsheets here</b>
@@ -266,7 +272,8 @@ function readInWorker(buffer, vendor, job) {
 let queueRunning = false;
 async function addLibraryFiles(files) {
   const vendor = $('#lib-vendor').value; const quarter = $('#lib-quarter').value.trim(); store.set('nd.quarter', quarter);
-  const jobs = [...files].map(file => ({ file, vendor, quarter, summary: isSummaryFileName(file.name), ref: isSummaryFileName(file.name) ? 'Summary' : refFromFileName(file.name), state: 'queued', msg: 'Waiting' }));
+  const jobs = [...files].map(file => { const summary = isSummaryFileName(file.name); const ref = summary ? 'Summary' : refFromFileName(file.name);
+    return { file, vendor: summary ? vendor : (vendorFromRef(ref) || vendor), quarter, summary, ref, state: 'queued', msg: 'Waiting' }; });
   jobs.sort((a, b) => b.summary - a.summary); // summary first, so notices get their titles
   S.queue.push(...jobs); refreshQueue();
   if (queueRunning) return; queueRunning = true;
@@ -276,9 +283,12 @@ async function addLibraryFiles(files) {
       try {
         if (job.summary) {
           const wb = XLSX.read(new Uint8Array(await job.file.arrayBuffer()), { type: 'array', cellDates: true });
-          const p = parseChangeSummary(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true }));
+          const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
+          const bbg = isBbgReport(aoa);
+          const p = bbg ? parseBbgReport(aoa) : parseChangeSummary(aoa);
+          job.vendor = bbg ? 'Bloomberg' : 'LSEG'; job.ref = `${job.vendor} summary`;
           const r = await rpc('lib_import_summary', { p_vendor: job.vendor, p_quarter: job.quarter, p_rows: p.rows });
-          job.msg = `${p.notices} notices: ${r.notices_created} new, ${r.notices_updated} updated`;
+          job.msg = `${p.notices} ${job.vendor} notices: ${r.notices_created} new, ${r.notices_updated} updated`;
         } else {
           const parsed = await readInWorker(await job.file.arrayBuffer(), job.vendor, job);
           if (!parsed.total) throw new Error('No instrument rows found');
@@ -324,10 +334,10 @@ document.addEventListener('click', async e => {
   const t = e.target.closest('[data-act],[data-tab],[data-remove],[data-rm]'); if (!t) return;
   try {
     if (t.dataset.tab) { S.tab = t.dataset.tab; return route(); }
-    if (t.dataset.remove) { S.files[t.dataset.remove] = null; return runCheck(); }
+    if (t.dataset.remove) { S.files.splice(Number(t.dataset.remove), 1); return runCheck(); }
     if (t.dataset.rm) { const [tid, uid] = t.dataset.rm.split('|'); await rpc('admin_remove_member', { p_tenant_id: tid, p_user_id: uid }); toast('User removed'); return route(); }
     if (t.dataset.act === 'download') downloadReport();
-    if (t.dataset.act === 'reset') { S.files = { usage: null, perms: null }; S.report = null; route(); }
+    if (t.dataset.act === 'reset') { S.files = []; S.report = null; route(); }
   } catch (err) { toast(err.message); }
 });
 document.addEventListener('change', e => {

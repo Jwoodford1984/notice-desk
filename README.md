@@ -7,10 +7,13 @@ Notice Desk tracks market data change notifications from LSEG, Bloomberg and the
 
 ## How it works
 
-1. **CJC IT builds the library.** Each quarter, a CJC IT admin opens **Library** and drops in the LSEG Quarterly Change Summary plus the notice spreadsheets (and later Bloomberg's).
+1. **CJC IT builds the library.** Each quarter, a CJC IT admin opens **Library** and drops in the LSEG Quarterly Change Summary plus the notice spreadsheets, and the Bloomberg quarterly report, all together.
+   - The Bloomberg report is recognised automatically. Its notices name Bloomberg **EIDs** (old and new), together with the category and the action Bloomberg asks for.
    - The summary creates the notices, with old and new PDP, PE and price for each line.
    - Each spreadsheet is matched to its notice by the DN number in its file name. Every RIC row is read from every tab (`remove`, `addNew`, `update`), including files of 650,000+ rows, and stored compactly. An LSEG quarter is about 1.3 million rows and 170 MB.
-2. **Clients check their impact.** A client user signs in, opens **Check impact** and drops their DACS *Usage Detail by User* and/or *Active Permission by Exchange* CSVs.
+2. **Clients check their impact.** A client user signs in, opens **Check impact** and drops their DACS *Usage Detail by User* and/or *Active Permission by Exchange* CSVs. Several files can go in at once, and Bloomberg B-PIPE services managed in DACS (VService `BPIPE`) are recognised automatically.
+   - **B-PIPE rows:** the EID is read from the leading digits of the Description, and tickers from items such as `kyRRN10M_BGSS_Curncy`, which becomes `RRN10M BGSS Curncy`.
+   - **Bloomberg actions** come from each notice's category: an entitlement change where the user lacks the new EID means ordering it, a symbology change means updating tickers, and data, fee or policy changes mean a review. Notices with no EIDs apply to all B-PIPE users. Cancelled notices are ignored.
    - **The files are read in the browser and never uploaded or stored.** Only RIC codes are sent to match against the library.
    - The report lists:
      - **Urgent actions:** RIC replaced, RIC removed, a service to order to keep access, content withdrawn.
@@ -61,6 +64,7 @@ npx tsx parsers.test.ts <usage.csv> <permissions.csv>              # parser chec
 PGHOST=localhost PGUSER=postgres ./run-db-tests.sh                  # schema, RLS and workflow on local Postgres
 node load-library.test.mjs <folder of LSEG .xlsx files>             # load a quarter into the local library (PG* env vars)
 npx tsx impact.test.mjs <usage.csv> <permissions.csv>               # run the impact report against it
+npx tsx bbg.test.mjs <BBG report.xlsx> <permissions.csv> <usage.csv> # Bloomberg report + B-PIPE files
 ```
 
 Client files (DACS exports, vendor notices) aren't committed. `.gitignore` excludes `sample-data/` apart from the invented B-PIPE sample.

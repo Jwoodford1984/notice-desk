@@ -59,60 +59,71 @@ function parseDacs(raw, encoding) {
       if (rows[i][1] === "ReqStartDate") meta.period = `${rows[i + 1]?.[1] ?? ""} \u2013 ${rows[i + 1]?.[2] ?? ""}`;
     }
   }
-  const hi = rows.findIndex((r) => r[0] === "SiteName" && r[1] === "VService");
-  if (hi < 0) throw new Error("Couldn't find the user table (a header row starting SiteName, VService).");
-  const H = rows[hi];
-  const col = (n) => H.indexOf(n);
-  const isUsage = col("Item") >= 0;
-  const isPerms = !isUsage && col("FeeStructure") >= 0;
+  const heads = [];
+  rows.forEach((r, i) => {
+    if (r[0] === "SiteName" && r[1] === "VService") heads.push(i);
+  });
+  if (!heads.length) throw new Error("Couldn't find the user table (a header row starting SiteName, VService).");
+  const H0 = rows[heads[0]];
+  const isUsage = H0.includes("Item");
+  const isPerms = !isUsage && H0.includes("FeeStructure");
   if (!isUsage && !isPerms) throw new Error("Unsupported DACS report. Use Usage Detail by User or Active Permission by Exchange.");
   const usage = [], perms = [];
   let blankPos = 0, dup = 0, noEmail = 0;
   const seen = /* @__PURE__ */ new Set();
-  for (let i = hi + 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (isBlank(r)) break;
-    const g = (n) => col(n) >= 0 ? r[col(n)] ?? "" : "";
-    if (isUsage) {
-      const o = {
-        login: g("Login"),
-        user_name: g("UName"),
-        user_group: g("UGroup"),
-        cost_centre: g("UCostCtr"),
-        email: g("Email"),
-        service_code: g("Global_Name"),
-        service_desc: g("Description"),
-        item: g("Item")
-      };
-      if (!o.item || !o.login) continue;
-      if (!g("UAccessPos")) blankPos++;
-      if (!o.email) noEmail++;
-      const k = o.login + "|" + o.item;
-      if (seen.has(k)) dup++;
-      seen.add(k);
-      usage.push(o);
-    } else {
-      const o = {
-        login: g("Login"),
-        user_name: g("UName"),
-        email: g("Email"),
-        service_code: g("Global_Name"),
-        service_desc: g("Description"),
-        fee_structure: g("FeeStructure"),
-        activated_label: g("Activation")
-      };
-      if (!o.login || !o.service_code) continue;
-      if (!o.email) noEmail++;
-      perms.push(o);
+  for (const hi of heads) {
+    const H = rows[hi];
+    const col = (n) => H.indexOf(n);
+    for (let i = hi + 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (isBlank(r)) break;
+      const g = (n) => col(n) >= 0 ? r[col(n)] ?? "" : "";
+      if (isUsage) {
+        const o = {
+          login: g("Login"),
+          user_name: g("UName"),
+          user_group: g("UGroup"),
+          cost_centre: g("UCostCtr"),
+          email: g("Email"),
+          service_code: g("Global_Name"),
+          service_desc: g("Description"),
+          item: g("Item"),
+          v_service: g("VService"),
+          site: g("SiteName")
+        };
+        if (!o.item || !o.login) continue;
+        if (!g("UAccessPos")) blankPos++;
+        if (!o.email) noEmail++;
+        const k = o.login + "|" + o.item;
+        if (seen.has(k)) dup++;
+        seen.add(k);
+        usage.push(o);
+      } else {
+        const o = {
+          login: g("Login"),
+          user_name: g("UName"),
+          email: g("Email"),
+          service_code: g("Global_Name"),
+          service_desc: g("Description"),
+          fee_structure: g("FeeStructure"),
+          activated_label: g("Activation"),
+          v_service: g("VService"),
+          site: g("SiteName")
+        };
+        if (!o.login || !o.service_code) continue;
+        if (!o.email) noEmail++;
+        perms.push(o);
+      }
     }
   }
+  if (heads.length > 1) warnings.push(`Read ${heads.length} site tables (${[...new Set((isUsage ? usage : perms).map((r) => r.site))].join(", ")}).`);
   const siteServices = [];
   const mi = rows.findIndex((r) => r[0] === "mapsite");
   if (mi >= 0) for (let j = mi + 1; j < rows.length && !isBlank(rows[j]); j++) {
     const r = rows[j];
     siteServices.push({ site_name: r[0], service_code: r[2], service_desc: r[3], fee_structure: r[4] });
   }
-  const repeats = rows.filter((r) => r[0] === meta.report).length - 1;
+  const repeats = Math.max(0, rows.filter((r) => r[0] === meta.report).length - heads.length);
   if (encoding !== "UTF-8") warnings.push(`File is ${encoding}-encoded, not UTF-8; read with the correct encoding.`);
   if (semis) warnings.push(`Removed ${semis} trailing semicolons from cells.`);
   if (repeats > 0) warnings.push(`Ignored ${repeats} repeated report header block(s).`);
@@ -256,11 +267,15 @@ function parseChangeSummary(aoa) {
   const idx = Object.fromEntries(Object.entries(SUMMARY_COLS).map(([k, re]) => [k, H.findIndex((h) => re.test(h))]));
   const dates = /* @__PURE__ */ new Set(["effective_from", "effective_to", "published_date"]);
   const rows = [];
-  let badDates = 0;
+  let badDates = 0, skipped = 0;
   for (let i = hi + 1; i < aoa.length; i++) {
     const r = aoa[i] ?? [];
     const id = String(r[idx.notification_id] ?? "").trim();
     if (!id) continue;
+    if (/\s/.test(id) || id.length > 20) {
+      skipped++;
+      continue;
+    }
     const o = {};
     for (const k of Object.keys(SUMMARY_COLS)) {
       const v = idx[k] >= 0 ? r[idx[k]] : "";
@@ -277,16 +292,118 @@ function parseChangeSummary(aoa) {
   const missing = Object.keys(SUMMARY_COLS).filter((k) => idx[k] < 0);
   if (missing.length) warnings.push(`Columns not found: ${missing.join(", ")}.`);
   if (badDates) warnings.push(`${badDates} date cell(s) could not be read.`);
+  if (skipped) warnings.push(`Skipped ${skipped} row(s) that aren't notices (notes below the table).`);
   const notices = new Set(rows.map((r) => r.notification_id)).size;
   return { rows, notices, warnings };
 }
+const BBG_COLS = {
+  ref: /^ref\.? ?id/i,
+  product: /^product$/i,
+  release: /^release date/i,
+  published: /^published date/i,
+  summary: /^summary$/i,
+  description: /^description$/i,
+  category: /^category$/i,
+  action: /^action required/i,
+  subproducts: /^sub-?products/i,
+  oldEid: /^old eid/i,
+  newEid: /^new eid/i,
+  asset: /^asset class/i,
+  region: /^region$/i,
+  revStatus: /^revision status/i,
+  revDetails: /^revision details/i,
+  fields: /^impacted bloomberg fields/i,
+  attachments: /^attachments/i,
+  driver: /^change driver/i
+};
+function isBbgReport(aoa) {
+  return aoa.slice(0, 10).some((r) => r.some((c) => BBG_COLS.ref.test(String(c).trim())) && r.some((c) => /eid/i.test(String(c))));
+}
+function parseEids(v) {
+  const ids = [], names = [];
+  for (const line of String(v ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+    if (/^n\/?a$/i.test(line) || /^does not apply/i.test(line)) continue;
+    const m = line.match(/^(\d{3,})\s*(?:-\s*(.*))?$/);
+    if (m) {
+      ids.push(m[1]);
+      names.push(m[2] ? `${m[1]} ${m[2]}` : m[1]);
+    }
+  }
+  return { ids, names };
+}
+function parseBbgReport(aoa) {
+  const hi = aoa.slice(0, 10).findIndex((r) => r.some((c) => BBG_COLS.ref.test(String(c).trim())));
+  if (hi < 0) throw new Error('Not a Bloomberg notice report: no "Ref. ID" column found.');
+  const H = aoa[hi].map((c) => String(c).replace(/\s+/g, " ").trim());
+  const idx = Object.fromEntries(Object.entries(BBG_COLS).map(([k, re]) => [k, H.findIndex((h) => re.test(h))]));
+  const g = (r, k) => idx[k] >= 0 ? String(r[idx[k]] ?? "").replace(/ /g, " ").trim() : "";
+  const raw = (r, k) => idx[k] >= 0 ? r[idx[k]] : "";
+  const rows = [];
+  let skipped = 0;
+  for (let i = hi + 1; i < aoa.length; i++) {
+    const r = aoa[i] ?? [];
+    const ref = g(r, "ref");
+    if (!ref) continue;
+    if (!/^\d+$/.test(ref)) {
+      skipped++;
+      continue;
+    }
+    const rel = raw(r, "release");
+    const relDates = typeof rel === "string" ? rel.match(/\d{4}-\d{2}-\d{2}/g) || [] : [];
+    const from = relDates[0] || toIsoDate(rel);
+    const to = relDates[1] || "";
+    const oldE = parseEids(raw(r, "oldEid")), newE = parseEids(raw(r, "newEid"));
+    const action = g(r, "action");
+    const actionHead = action.split(/\r?\n/)[0].trim();
+    const actionBody = action.split(/\r?\n/).slice(1).join(" ").replace(/\s+/g, " ").trim();
+    const extra = [
+      actionBody && `Action required (${actionHead}): ${actionBody}`,
+      g(r, "revDetails") && `Revision: ${g(r, "revDetails")}`,
+      g(r, "fields") && `Impacted fields: ${g(r, "fields").replace(/\r?\n/g, ", ")}`,
+      g(r, "driver") && `Change driver: ${g(r, "driver")}`
+    ].filter(Boolean).join("\n\n");
+    rows.push({
+      notification_id: ref,
+      title: g(r, "summary") || ref,
+      change_type: g(r, "category"),
+      effective_from: from,
+      effective_to: to,
+      summary: g(r, "description"),
+      description: [g(r, "description"), extra].filter(Boolean).join("\n\n"),
+      published_date: toIsoDate(raw(r, "published")),
+      revision_reason: g(r, "revDetails"),
+      affected_band: "",
+      old_pdp: oldE.ids.join(","),
+      new_pdp: newE.ids.join(","),
+      old_price: "",
+      new_price: "",
+      old_pe: oldE.names.join("; "),
+      new_pe: newE.names.join("; "),
+      status: g(r, "revStatus"),
+      version: "",
+      associated_ids: "",
+      associated_products: g(r, "subproducts").replace(/\r?\n/g, ", "),
+      content_set: [g(r, "asset"), g(r, "region")].filter((v) => v && !/^n\/a$/i.test(v)).join(" \xB7 "),
+      related_links: g(r, "attachments").replace(/\r?\n/g, ", "),
+      action_required: actionHead
+    });
+  }
+  const warnings = [];
+  if (skipped) warnings.push(`Skipped ${skipped} row(s) that aren't notices.`);
+  const missing = ["ref", "release", "category", "action", "oldEid", "newEid"].filter((k) => idx[k] < 0);
+  if (missing.length) warnings.push(`Columns not found: ${missing.join(", ")}.`);
+  return { rows, notices: new Set(rows.map((r) => r.notification_id)).size, warnings };
+}
 export {
   decode,
+  isBbgReport,
   isChangeSummary,
+  parseBbgReport,
   parseBpipeUsage,
   parseCSV,
   parseChangeSummary,
   parseDacs,
+  parseEids,
   parseNoticeSheet,
   parseSource,
   toIsoDate

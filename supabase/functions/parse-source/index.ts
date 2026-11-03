@@ -27,11 +27,11 @@ Deno.serve(req => handle(req, async () => {
 
   try {
     if (parsed.kind === 'lseg_permissions') {
-      await insertChunked(db, 'permissions', parsed.rows.map(r => ({ ...r, tenant_id, source_id: src.id })));
+      await insertChunked(db, 'permissions', parsed.rows.map(({ v_service, site, ...r }) => ({ ...r, tenant_id, source_id: src.id })));
       await insertChunked(db, 'site_services', parsed.siteServices.map(r => ({ ...r, tenant_id, source_id: src.id })));
     } else {
       const vendor = parsed.kind === 'bpipe_usage' ? 'Bloomberg' : 'LSEG';
-      await insertChunked(db, 'usage_items', parsed.rows.map(r => ({ ...r, tenant_id, source_id: src.id, vendor })));
+      await insertChunked(db, 'usage_items', parsed.rows.map(({ v_service, site, ...r }) => ({ ...r, tenant_id, source_id: src.id, vendor })));
     }
     // Only now does matching switch to the new file
     const { error: actErr } = await db.rpc('activate_source', { p_source_id: src.id });

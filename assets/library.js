@@ -8,8 +8,13 @@ export function refFromFileName(name) {
   const base = String(name).replace(/\.[^.]+$/, '');
   const dn = base.match(/\bDN\s?-?\s?(\d{5,})/i);
   if (dn) return 'DN' + dn[1];
+  const bbg = base.match(/^(\d{5,})(?:[_\s.-]|$)/); // Bloomberg attachments: "20453_v1.xlsx"
+  if (bbg) return bbg[1];
   return base.trim();
 }
+
+/** Vendor implied by a notice reference: LSEG uses DN numbers, Bloomberg plain Ref. IDs. */
+export const vendorFromRef = ref => /^\d+$/.test(ref) ? 'Bloomberg' : /^DN/i.test(ref) ? 'LSEG' : null;
 
 /** Spot the Quarterly Change Summary among dropped files. */
 export const isSummaryFileName = name => /change summary|quarterly/i.test(name);

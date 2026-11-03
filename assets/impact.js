@@ -7,10 +7,26 @@ export const splitCodes = s => String(s || '').replace(/ /g, ' ').split(/[\s,;]
 const pdpSet = s => new Set(splitCodes(s).filter(c => !isProductCode(c)));
 const uniq = a => [...new Set(a)];
 
+export const isBpipeRow = r => /^BPIPE$/i.test(String(r.v_service || ''));
+/** DACS B-PIPE items look like "kyRRN10M_BGSS_Curncy": drop the "ky" prefix, underscores are spaces. */
+export const bpipeDisplay = item => String(item || '').trim().replace(/^ky(?=[A-Z0-9.])/, '').replace(/_/g, ' ').replace(/\s+/g, ' ');
+export const bpipeTicker = item => bpipeDisplay(item).toUpperCase();
+/** Bloomberg EID of a DACS B-PIPE row: leading digits of Description ("33828 Bloomberg BGN …") or Global_Name ("74835_Cantor…"). */
+export const eidOf = r => (String(r.service_desc || '').match(/^(\d{3,})\b/) || String(r.service_code || '').match(/^(\d{3,})_/) || [])[1] || '';
+
+/** Codes to send for matching, per vendor: LSEG RICs (plus chain bases) and Bloomberg tickers. */
+export function vendorUsageCodes(usage) {
+  return { LSEG: [...usageCodes(usage.filter(u => !isBpipeRow(u))).keys()], Bloomberg: [...usageCodes(usage.filter(isBpipeRow), 'Bloomberg').keys()] };
+}
+
 /** Codes to send for matching: each usage item normalised, plus the base of chain RICs. */
-export function usageCodes(usage) {
+export function usageCodes(usage, vendor = 'LSEG') {
   const map = new Map(); // code sent -> [{ row, via }]
   for (const u of usage) {
+    if (vendor === 'Bloomberg') {
+      const t = bpipeTicker(u.item); if (!t) continue;
+      if (!map.has(t)) map.set(t, []); map.get(t).push({ row: u, via: 'direct' }); continue;
+    }
     const norm = String(u.item || '').trim().replace(/^\//, '');
     if (!norm) continue;
     const add = (code, via) => { if (!map.has(code)) map.set(code, []); map.get(code).push({ row: u, via }); };
@@ -21,8 +37,8 @@ export function usageCodes(usage) {
 }
 
 export const SEVERITY = {
-  'Update RIC': 1, 'RIC removed': 1, 'Order service': 1, 'Content withdrawn': 1,
-  'Check entitlement': 2, 'Price change': 2, 'Review policy': 2, 'Review notice': 2,
+  'Update RIC': 1, 'RIC removed': 1, 'Order service': 1, 'Content withdrawn': 1, 'Update tickers': 1,
+  'Check entitlement': 2, 'Review data change': 2, 'Price change': 2, 'Review policy': 2, 'Review notice': 2,
   'Information': 3,
 };
 
@@ -44,11 +60,23 @@ function dueText(effective, today) {
  * @param {object[]} input.matches      lib_match_codes rows for the usage codes
  * @param {string}   input.today        YYYY-MM-DD
  */
-export function buildReport({ usage = [], perms = [], notices = [], changes = [], matches = [], today }) {
+export function buildReport({ usage = [], perms = [], notices = [], changes = [], matches = [], bbgMatches = [], today }) {
   const noticeById = new Map(notices.map(n => [n.id, n]));
+  const cancelled = n => /cancel/i.test(n.vendor_status || '');
+  // DACS can carry Bloomberg B-PIPE services (VService BPIPE) alongside LSEG (IDN)
+  const lsegUsage = usage.filter(u => !isBpipeRow(u)), bbgUsage = usage.filter(isBpipeRow);
+  const lsegPerms = perms.filter(p => !isBpipeRow(p)), bbgPerms = perms.filter(isBpipeRow);
   const permsBy = new Map();
-  for (const p of perms) { if (!permsBy.has(p.login)) permsBy.set(p.login, new Set()); permsBy.get(p.login).add(p.service_code); }
-  const hasPerms = perms.length > 0;
+  for (const p of lsegPerms) { if (!permsBy.has(p.login)) permsBy.set(p.login, new Set()); permsBy.get(p.login).add(p.service_code); }
+  const hasPerms = lsegPerms.length > 0;
+  // Bloomberg: EIDs held (permissions) and tickers requested per EID (usage)
+  const eidsBy = new Map(), tickersBy = new Map();
+  for (const p of bbgPerms) { const e = eidOf(p); if (!e) continue; if (!eidsBy.has(p.login)) eidsBy.set(p.login, new Set()); eidsBy.get(p.login).add(e); }
+  for (const u of bbgUsage) {
+    const e = eidOf(u); if (!e) continue;
+    if (!tickersBy.has(u.login)) tickersBy.set(u.login, new Map());
+    const m = tickersBy.get(u.login); if (!m.has(e)) m.set(e, new Set()); m.get(e).add(bpipeDisplay(u.item));
+  }
 
   // People and applications on the site
   const people = new Map();
@@ -64,7 +92,7 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
     const key = `${n.id}|${category}|${extra.groupKey || text}`;
     if (!actions.has(key)) {
       const d = dueText(n.effective_date, today);
-      actions.set(key, { notice_id: n.id, ref: n.ref, title: n.title, effective_date: n.effective_date, due_date: d.due, due_label: d.label,
+      actions.set(key, { notice_id: n.id, ref: n.ref, vendor: n.vendor, title: n.title, effective_date: n.effective_date, due_date: d.due, due_label: d.label,
         category, severity: SEVERITY[category] || 3, text, users: new Set(), rics: new Set(), ...extra });
       delete actions.get(key).groupKey;
     }
@@ -74,23 +102,29 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
   };
 
   // ---- RIC level: library rows whose code appears in usage
-  const codeMap = usageCodes(usage);
+  const codeMap = usageCodes(lsegUsage);
+  const bbgCodeMap = usageCodes(bbgUsage, 'Bloomberg');
   const ricDetail = []; // one row per user x RIC x notice
   const ricNoticeUsers = new Set(); // notice|login pairs already covered at RIC level
-  for (const m of matches) {
-    const n = noticeById.get(m.notice_id); if (!n) continue;
-    const hits = codeMap.get(m.code) || [];
+  const seenRic = new Set();
+  const tagged = [...matches.map(m => ({ m, bbg: false })), ...bbgMatches.map(m => ({ m, bbg: true }))];
+  for (const { m, bbg } of tagged) {
+    const n = noticeById.get(m.notice_id); if (!n || cancelled(n)) continue;
+    const hits = (bbg ? bbgCodeMap : codeMap).get(m.code) || [];
+    const heldBy = bbg ? eidsBy : permsBy; const hasHeld = bbg ? bbgPerms.length > 0 : hasPerms;
     const ct = m.change_type || '';
     const oldS = pdpSet(m.old_pdp), newS = pdpSet(m.new_pdp);
     const removed = [...oldS].filter(c => !newS.has(c)), added = [...newS].filter(c => !oldS.has(c));
     for (const { row, via } of hits) {
       const login = row.login; ricNoticeUsers.add(`${n.id}|${login}`);
+      const dedupe = `${n.id}|${login}|${row.item}|${m.code}`; // usage files repeat login + RIC rows
+      if (seenRic.has(dedupe)) continue; seenRic.add(dedupe);
       const ric = row.item;
       let access = 'n/a';
       if (newS.size) {
-        if (!hasPerms) access = 'unchecked';
-        else if (!permsBy.has(login)) access = 'not in permission file';
-        else access = [...newS].some(c => permsBy.get(login).has(c)) ? 'keeps' : 'loses';
+        if (!hasHeld) access = 'unchecked';
+        else if (!heldBy.has(login)) access = 'not in permission file';
+        else access = [...newS].some(c => heldBy.get(login).has(c)) ? 'keeps' : 'loses';
       }
       let category = 'Information', text = '';
       if (/RIC change/i.test(ct) && m.new_code) {
@@ -126,7 +160,7 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
   const pdpDetail = [];
   if (hasPerms) {
     for (const c of changes) {
-      const n = noticeById.get(c.notice_id); if (!n) continue;
+      const n = noticeById.get(c.notice_id); if (!n || n.vendor === 'Bloomberg' || cancelled(n)) continue;
       const types = (n.change_types || []).join(' | ');
       const oldS = pdpSet(c.old_pdp), newS = pdpSet(c.new_pdp);
       for (const [login, held] of permsBy) {
@@ -153,8 +187,65 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
     }
   }
 
+  // ---- Bloomberg: notices name EIDs; users hold EIDs (permissions) and request tickers under them (usage)
+  const bbgLogins = new Set([...eidsBy.keys(), ...tickersBy.keys()]);
+  const hasBbg = bbgLogins.size > 0;
+  const bbgDetail = [];
+  if (hasBbg) {
+    for (const c of changes) {
+      const n = noticeById.get(c.notice_id); if (!n || n.vendor !== 'Bloomberg' || cancelled(n)) continue;
+      const oldE = splitCodes(c.old_pdp), newE = splitCodes(c.new_pdp);
+      const cat = (n.change_types || [])[0] || 'Change'; const act = n.action_required || '';
+      const named = [...String(c.old_pe || '').split('; '), ...String(c.new_pe || '').split('; ')].filter(Boolean);
+      const nm = e => named.find(x => x.startsWith(e + ' ')) || `EID ${e}`;
+      if (!oldE.length && !newE.length) {
+        if (!/information only/i.test(act) && !/information only/i.test(cat)) {
+          addAction(n, 'Review notice', `${cat}${act ? ` (${act})` : ''}: ${n.title}. Applies to B-PIPE generally rather than particular entitlements.`, null, null, { site: true, groupKey: 'site' });
+        }
+        continue;
+      }
+      for (const login of bbgLogins) {
+        const held = eidsBy.get(login) || new Set(); const used = tickersBy.get(login) || new Map();
+        const has = e => held.has(e) || used.has(e);
+        const holdsOld = oldE.filter(has), holdsNew = newE.filter(has);
+        if (!holdsOld.length && !holdsNew.length) continue;
+        const touched = uniq([...holdsOld, ...holdsNew]);
+        const tickers = uniq(touched.flatMap(e => [...(used.get(e) || [])]));
+        let category = 'Review notice', text = `${cat}${act ? ` (${act})` : ''} for ${touched.map(nm).join(', ')}. Review the notice.`, key = 'general';
+        if (/entitlement/i.test(cat) && holdsOld.length && newE.length && !holdsNew.length) {
+          category = 'Order service'; key = `order:${newE.join(',')}`;
+          text = `Entitle these users to ${newE.map(nm).join(' or ')}. Content moves there from ${holdsOld.map(nm).join(', ')}; without it they lose access.`;
+        } else if (/entitlement/i.test(cat) && holdsOld.length && holdsNew.length) {
+          category = 'Information'; key = 'covered';
+          text = `Content moves from ${holdsOld.map(nm).join(', ')} to ${holdsNew.map(nm).join(', ')}, which these users already hold.`;
+        } else if (/entitlement/i.test(cat)) {
+          category = 'Check entitlement'; key = 'entitlement';
+          text = `Entitlement change for ${touched.map(nm).join(', ')}${act ? ` (${act})` : ''}. Check what these users need.`;
+        } else if (/symbology|discontinu/i.test(cat)) {
+          category = 'Update tickers'; key = 'symbology';
+          text = `Tickers under ${touched.map(nm).join(', ')} are being replaced or discontinued. Review subscriptions and move to the replacement tickers.`;
+        } else if (/fee|policy|price/i.test(cat)) {
+          category = 'Review policy'; key = 'fee';
+          text = `Fee or policy change for ${touched.map(nm).join(', ')}. Review costs, licensing and recharges.`;
+        } else if (/data change/i.test(cat)) {
+          category = 'Review data change'; key = 'data';
+          text = `Data change for ${touched.map(nm).join(', ')}. Check the applications and users that rely on this data.`;
+        }
+        addAction(n, category, text, login, null, { groupKey: key });
+        for (const t of tickers) addAction(n, category, text, login, t, { groupKey: key });
+        bbgDetail.push({ ref: n.ref, login, eids: touched.join(', '), tickers: tickers.length, action: category });
+        for (const e of touched) for (const t of (used.get(e) || [])) {
+          const dk = `${n.id}|${login}|${t}`; if (seenRic.has(dk)) continue; seenRic.add(dk);
+          ricDetail.push({ ref: n.ref, effective_date: n.effective_date, login, ric: t, matched_code: e, via: 'eid', ric_name: nm(e),
+            change: cat, new_code: '', pdp_removed: oldE.includes(e) && !newE.includes(e) ? `EID ${e}` : '', pdp_added: '',
+            new_pdps: newE.join(', '), access: !newE.length ? 'n/a' : holdsNew.length ? 'keeps' : 'loses', action: category });
+        }
+      }
+    }
+  }
+
   // ---- Assemble
-  const actionList = [...actions.values()].map(a => ({
+  const actionList = [...actions.values()].filter(a => a.category !== 'Information' || a.users.size).map(a => ({
     ...a, users: [...a.users].sort(), rics: [...a.rics].sort(),
     user_names: [...a.users].sort().map(l => people.get(l)?.name || l),
   })).sort((a, b) => a.severity - b.severity || (a.effective_date || '').localeCompare(b.effective_date || '') || a.ref.localeCompare(b.ref));
@@ -180,13 +271,14 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
   actionList.forEach(a => { counts[a.category] = (counts[a.category] || 0) + 1; });
   return {
     stats: {
-      usage_rows: usage.length, perm_rows: perms.length, logins: people.size, codes_checked: codeMap.size,
+      usage_rows: usage.length, perm_rows: perms.length, logins: people.size, codes_checked: codeMap.size + bbgCodeMap.size,
+      bpipe_usage_rows: bbgUsage.length, bpipe_perm_rows: bbgPerms.length, bpipe_logins: bbgLogins.size,
       notices_checked: notices.length, notices_affecting: noticeList.length, users_affected: users.length,
       actions: actionList.length, urgent: actionList.filter(a => a.severity === 1).length,
       losing_access: uniq(ricDetail.filter(r => r.access === 'loses').map(r => r.login)).length,
       by_category: counts,
     },
-    actions: actionList, users, notices: noticeList, ricDetail, pdpDetail, people,
+    actions: actionList, users, notices: noticeList, ricDetail, pdpDetail, bbgDetail, people,
   };
 }
 
@@ -196,13 +288,13 @@ export function reportSheets(report, people) {
   return {
     Actions: report.actions.map(a => ({ Priority: a.severity === 1 ? 'Urgent' : a.severity === 2 ? 'Review' : 'Info', Notice: a.ref, Title: a.title,
       Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Action: a.category, 'What to do': a.text,
-      Users: a.users.map(name).join('; '), 'User count': a.users.length, RICs: a.rics.slice(0, 50).join(' '), 'RIC count': a.rics.length })),
+      Vendor: a.vendor || '', Users: a.site ? 'All B-PIPE users' : a.users.map(name).join('; '), 'User count': a.users.length, RICs: a.rics.slice(0, 50).join(' '), 'RIC count': a.rics.length })),
     'By user': report.users.flatMap(u => u.actions.map(a => ({ Login: u.login, Name: u.name, 'Cost centre': u.cost_centre, Email: u.email,
       Notice: a.ref, Effective: a.effective_date || '', Action: a.category, 'What to do': a.text }))),
     'By notice': report.notices.map(n => ({ Notice: n.ref, Title: n.title, Effective: n.effective_date || '', 'Change types': (n.change_types || []).join(', '),
       Users: n.users.length, RICs: n.rics.length, Actions: n.actions.map(a => a.category).join(', '), Summary: n.summary || '' })),
     'RIC detail': report.ricDetail.map(r => ({ Notice: r.ref, Effective: r.effective_date || '', Login: r.login, Name: name(r.login), RIC: r.ric,
-      'Matched on': r.via === 'chain' ? `chain of ${r.matched_code}` : r.matched_code, 'RIC name': r.ric_name, Change: r.change, 'New RIC': r.new_code,
+      'Matched on': r.via === 'chain' ? `chain of ${r.matched_code}` : r.via === 'eid' ? `EID ${r.matched_code}` : r.matched_code, 'RIC name': r.ric_name, Change: r.change, 'New RIC': r.new_code,
       'PDP removed': r.pdp_removed, 'PDP added': r.pdp_added, 'New PDPs': r.new_pdps, Access: r.access, Action: r.action })),
     'PDP detail': report.pdpDetail.map(p => ({ Notice: p.ref, Login: p.login, Name: name(p.login), 'Holds': p.held, 'Old PDP': p.old_pdp, 'New PDP': p.new_pdp,
       'Old price': p.old_price, 'New price': p.new_price })),
