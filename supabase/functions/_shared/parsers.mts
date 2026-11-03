@@ -346,3 +346,60 @@ export function parseBbgReport(aoa: unknown[][]): { rows: BbgReportRow[]; notice
   if (missing.length) warnings.push(`Columns not found: ${missing.join(', ')}.`);
   return { rows, notices: new Set(rows.map(r => r.notification_id)).size, warnings };
 }
+
+// ---------------------------------------------------------------------------
+// LSEG quarterly Exchange Prices workbook ("Exchange PDP Pricing" and
+// "Direct Billed Exchanges" sheets). One row per PDP; where a PDP is listed
+// more than once (country exceptions), the row without an exception wins.
+// ---------------------------------------------------------------------------
+export type PriceRow = {
+  pdp: string; exchange_name: string; service_name: string; billed_by: string; country_exceptions: string; comments: string;
+  user_charge: number | null; currency: string; site_licence: number | null;
+  price_usd: number | null; price_eur: number | null; price_gbp: number | null; dn: string; source: 'price list' | 'direct billed';
+};
+const num = (v: unknown): number | null => {
+  if (typeof v === 'number' && isFinite(v)) return Math.round(v * 100) / 100;
+  const n = parseFloat(String(v ?? '').replace(/[^\d.\-]/g, ''));
+  return isFinite(n) ? Math.round(n * 100) / 100 : null;
+};
+export function isPriceWorkbook(sheetNames: string[]): boolean {
+  return sheetNames.some(n => /pdp pricing/i.test(n));
+}
+export function parseLsegPriceList(sheets: { name: string; aoa: unknown[][] }[]): { rows: PriceRow[]; warnings: string[] } {
+  const warnings: string[] = []; const all: PriceRow[] = [];
+  for (const s of sheets) {
+    const pricing = /pdp pricing/i.test(s.name), direct = /direct billed/i.test(s.name);
+    if (!pricing && !direct) continue;
+    const hi = s.aoa.slice(0, 30).findIndex(r => r.some(c => /pdp\s*\/?\s*service\s+code/i.test(String(c))));
+    if (hi < 0) { warnings.push(`${s.name}: no "PDP/ Service Code" column found.`); continue; }
+    const H = s.aoa[hi].map(c => String(c).replace(/\s+/g, ' ').trim());
+    const f = (re: RegExp, not?: RegExp) => H.findIndex(h => re.test(h) && !(not && not.test(h)));
+    const c = {
+      exch: f(/^exchange name/i), svc: f(/^service name/i), pdp: f(/pdp\s*\/?\s*service\s+code/i), billed: f(/^billed by/i),
+      exc: f(/country exceptions/i), com: f(/special comments/i), charge: f(/user charge/i), cur: f(/^exchange currency/i),
+      site: f(/^site licen[cs]e charge/i, /china/i), usd: f(/indicative price in usd/i), eur: f(/indicative price in eur/i),
+      gbp: f(/indicative price in gbp/i), dn: f(/dn number/i),
+    };
+    let lastExch = '';
+    for (let i = hi + 1; i < s.aoa.length; i++) {
+      const r = s.aoa[i] || []; const g = (k: keyof typeof c) => (c[k] >= 0 ? String(r[c[k]] ?? '').replace(/\s+/g, ' ').trim() : '');
+      const pdp = g('pdp'); if (!pdp || /\s/.test(pdp) || pdp.length > 15) continue;
+      if (g('exch')) lastExch = g('exch');
+      all.push({
+        pdp, exchange_name: g('exch') || lastExch, service_name: g('svc'), billed_by: g('billed') || (direct ? 'Provider' : ''),
+        country_exceptions: g('exc'), comments: g('com'),
+        user_charge: pricing ? num(r[c.charge]) : null, currency: g('cur'), site_licence: pricing && c.site >= 0 ? num(r[c.site]) : null,
+        price_usd: pricing && c.usd >= 0 ? num(r[c.usd]) : null, price_eur: pricing && c.eur >= 0 ? num(r[c.eur]) : null,
+        price_gbp: pricing && c.gbp >= 0 ? num(r[c.gbp]) : null, dn: g('dn'), source: pricing ? 'price list' : 'direct billed',
+      });
+    }
+  }
+  const best = new Map<string, PriceRow>();
+  for (const p of all) {
+    const cur = best.get(p.pdp);
+    const score = (x: PriceRow) => (x.source === 'price list' ? 2 : 0) + (x.country_exceptions ? 0 : 1);
+    if (!cur || score(p) > score(cur)) best.set(p.pdp, p);
+  }
+  if (!best.size) warnings.push('No prices found.');
+  return { rows: [...best.values()], warnings };
+}

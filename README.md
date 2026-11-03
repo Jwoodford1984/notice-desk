@@ -20,6 +20,7 @@ Notice Desk tracks market data change notifications from LSEG, Bloomberg and the
      - **Reviews:** entitlement checks, price changes, policy changes.
      - **Affected users and applications:** with what each needs to do, by notice and by RIC.
    - The report downloads as Excel.
+   - **Costs:** with LSEG's quarterly *Exchange Prices* workbook dropped into the library (any file name containing "price"), each "Order service" action shows the cheapest listed new PDP per user per month, in the list currency and in indicative GBP. Price changes show the monthly difference for the users affected, and the report's headline gives the estimated monthly cost of urgent actions.
 3. **CJC IT manages clients.** In **Clients**, an admin adds client organisations and their users. Logins are created in Supabase Authentication.
 
 The rules that turn a change into an action are in `assets/impact.js`.
@@ -65,6 +66,7 @@ PGHOST=localhost PGUSER=postgres ./run-db-tests.sh                  # schema, RL
 node load-library.test.mjs <folder of LSEG .xlsx files>             # load a quarter into the local library (PG* env vars)
 npx tsx impact.test.mjs <usage.csv> <permissions.csv>               # run the impact report against it
 npx tsx bbg.test.mjs <BBG report.xlsx> <permissions.csv> <usage.csv> # Bloomberg report + B-PIPE files
+npx tsx prices.test.mts <Exchange Prices.xlsx>                      # LSEG price list into the local library
 ```
 
 Client files (DACS exports, vendor notices) aren't committed. `.gitignore` excludes `sample-data/` apart from the invented B-PIPE sample.

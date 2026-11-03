@@ -394,16 +394,88 @@ function parseBbgReport(aoa) {
   if (missing.length) warnings.push(`Columns not found: ${missing.join(", ")}.`);
   return { rows, notices: new Set(rows.map((r) => r.notification_id)).size, warnings };
 }
+const num = (v) => {
+  if (typeof v === "number" && isFinite(v)) return Math.round(v * 100) / 100;
+  const n = parseFloat(String(v ?? "").replace(/[^\d.\-]/g, ""));
+  return isFinite(n) ? Math.round(n * 100) / 100 : null;
+};
+function isPriceWorkbook(sheetNames) {
+  return sheetNames.some((n) => /pdp pricing/i.test(n));
+}
+function parseLsegPriceList(sheets) {
+  const warnings = [];
+  const all = [];
+  for (const s of sheets) {
+    const pricing = /pdp pricing/i.test(s.name), direct = /direct billed/i.test(s.name);
+    if (!pricing && !direct) continue;
+    const hi = s.aoa.slice(0, 30).findIndex((r) => r.some((c2) => /pdp\s*\/?\s*service\s+code/i.test(String(c2))));
+    if (hi < 0) {
+      warnings.push(`${s.name}: no "PDP/ Service Code" column found.`);
+      continue;
+    }
+    const H = s.aoa[hi].map((c2) => String(c2).replace(/\s+/g, " ").trim());
+    const f = (re, not) => H.findIndex((h) => re.test(h) && !(not && not.test(h)));
+    const c = {
+      exch: f(/^exchange name/i),
+      svc: f(/^service name/i),
+      pdp: f(/pdp\s*\/?\s*service\s+code/i),
+      billed: f(/^billed by/i),
+      exc: f(/country exceptions/i),
+      com: f(/special comments/i),
+      charge: f(/user charge/i),
+      cur: f(/^exchange currency/i),
+      site: f(/^site licen[cs]e charge/i, /china/i),
+      usd: f(/indicative price in usd/i),
+      eur: f(/indicative price in eur/i),
+      gbp: f(/indicative price in gbp/i),
+      dn: f(/dn number/i)
+    };
+    let lastExch = "";
+    for (let i = hi + 1; i < s.aoa.length; i++) {
+      const r = s.aoa[i] || [];
+      const g = (k) => c[k] >= 0 ? String(r[c[k]] ?? "").replace(/\s+/g, " ").trim() : "";
+      const pdp = g("pdp");
+      if (!pdp || /\s/.test(pdp) || pdp.length > 15) continue;
+      if (g("exch")) lastExch = g("exch");
+      all.push({
+        pdp,
+        exchange_name: g("exch") || lastExch,
+        service_name: g("svc"),
+        billed_by: g("billed") || (direct ? "Provider" : ""),
+        country_exceptions: g("exc"),
+        comments: g("com"),
+        user_charge: pricing ? num(r[c.charge]) : null,
+        currency: g("cur"),
+        site_licence: pricing && c.site >= 0 ? num(r[c.site]) : null,
+        price_usd: pricing && c.usd >= 0 ? num(r[c.usd]) : null,
+        price_eur: pricing && c.eur >= 0 ? num(r[c.eur]) : null,
+        price_gbp: pricing && c.gbp >= 0 ? num(r[c.gbp]) : null,
+        dn: g("dn"),
+        source: pricing ? "price list" : "direct billed"
+      });
+    }
+  }
+  const best = /* @__PURE__ */ new Map();
+  for (const p of all) {
+    const cur = best.get(p.pdp);
+    const score = (x) => (x.source === "price list" ? 2 : 0) + (x.country_exceptions ? 0 : 1);
+    if (!cur || score(p) > score(cur)) best.set(p.pdp, p);
+  }
+  if (!best.size) warnings.push("No prices found.");
+  return { rows: [...best.values()], warnings };
+}
 export {
   decode,
   isBbgReport,
   isChangeSummary,
+  isPriceWorkbook,
   parseBbgReport,
   parseBpipeUsage,
   parseCSV,
   parseChangeSummary,
   parseDacs,
   parseEids,
+  parseLsegPriceList,
   parseNoticeSheet,
   parseSource,
   toIsoDate
