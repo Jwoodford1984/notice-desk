@@ -5,22 +5,28 @@ Notice Desk tracks market data change notifications from LSEG, Bloomberg and the
 - **App:** a static web app (`index.html`, `assets/`). There's no build step, and GitHub Pages hosts it.
 - **Backend:** Supabase (`supabase/`). It provides Postgres with row level security, storage, and Edge Functions that read the files.
 
-## What it does
+## How it works
 
-- **Imports the LSEG Quarterly Change Summary.** It creates one notice per Notification ID and stores the old and new PDP, PE and price for each line. Re-importing updates notices in place and keeps their status, files and actions.
-- **Reads LSEG notice spreadsheets.** It reads every tab (`remove`, `addNew`, `update`) along with other layouts, and handles files of 650,000+ rows. Files are read in the browser and only instruments in your usage are stored. Each matched user and RIC gets an access check: does the login hold any of the RIC's new PDPs?
-- **Reads DACS exports.** These are the *Usage Detail by User* and *Active Permission by Exchange* reports. It also reads Bloomberg B-PIPE usage CSVs. A new file replaces the old one only once it has loaded completely.
-- **Matches notices against your data:**
-  - **RICs and tickers:** instruments in a notice's spreadsheet are matched against usage, including chain RICs, delayed `/` RICs and tickers in any case or spacing.
-  - **PDPs:** codes a notice removes, adds or remaps are matched against permissioned logins.
-- **Creates actions.** There's one action per affected person or application team, with an email draft for each.
-- **Keeps clients separate.** Each client gets a workspace with admin, member and viewer roles, enforced by the database.
+1. **CJC IT builds the library.** Each quarter, a CJC IT admin opens **Library** and drops in the LSEG Quarterly Change Summary plus the notice spreadsheets (and later Bloomberg's).
+   - The summary creates the notices, with old and new PDP, PE and price for each line.
+   - Each spreadsheet is matched to its notice by the DN number in its file name. Every RIC row is read from every tab (`remove`, `addNew`, `update`), including files of 650,000+ rows, and stored compactly. An LSEG quarter is about 1.3 million rows and 170 MB.
+2. **Clients check their impact.** A client user signs in, opens **Check impact** and drops their DACS *Usage Detail by User* and/or *Active Permission by Exchange* CSVs.
+   - **The files are read in the browser and never uploaded or stored.** Only RIC codes are sent to match against the library.
+   - The report lists:
+     - **Urgent actions:** RIC replaced, RIC removed, a service to order to keep access, content withdrawn.
+     - **Reviews:** entitlement checks, price changes, policy changes.
+     - **Affected users and applications:** with what each needs to do, by notice and by RIC.
+   - The report downloads as Excel.
+3. **CJC IT manages clients.** In **Clients**, an admin adds client organisations and their users. Logins are created in Supabase Authentication.
+
+The rules that turn a change into an action are in `assets/impact.js`.
 
 ## Repository layout
 
 ```
-index.html, assets/          the web app (assets/config.js holds the Supabase URL and publishable key)
-supabase/migrations/         schema, logic, RLS, storage, change-summary import
+index.html, assets/          the web app: app.js (UI), impact.js (report rules), library.js (library loading),
+                             notice-worker.js (reads spreadsheets off the main thread), dacs-parsers.js (generated)
+supabase/migrations/         schema, RLS, storage, change summary, notice files, shared library (update 3)
 supabase/functions/          parse-source, parse-notice-file, import-change-summary (+ _shared parsers;
                              _shared/notice-workbook.js is also used by the app's assets/notice-worker.js)
 supabase/seed.sql            demo workspace with invented data
@@ -35,11 +41,13 @@ Either use the Supabase CLI (`supabase link`, then `supabase db push` and `supab
 
 Then put the project URL and **publishable** key in `assets/config.js`. The publishable key is meant for browsers, and RLS protects the data. Never put the secret key in this repo.
 
-## Users and workspaces
+## Users
 
-1. Create users in Supabase → Authentication → Users.
-2. A signed-in user with no workspace can create one, and becomes its admin.
-3. Admins add other users by inserting rows into `tenant_members`. An in-app screen for this is still to come.
+- **CJC IT admins** are listed in `app_admins`. Add one with:
+  ```sql
+  insert into app_admins(user_id) select id from auth.users where email = 'name@cjcit.com';
+  ```
+- **Client users** are created in Supabase → Authentication → Users, then added to their client on the **Clients** page.
 
 ## Running the app locally
 
@@ -51,6 +59,8 @@ Any static file server works, for example `python3 -m http.server 8000` from the
 cd tests && npm install
 npx tsx parsers.test.ts <usage.csv> <permissions.csv>              # parser checks against your DACS files
 PGHOST=localhost PGUSER=postgres ./run-db-tests.sh                  # schema, RLS and workflow on local Postgres
+node load-library.test.mjs <folder of LSEG .xlsx files>             # load a quarter into the local library (PG* env vars)
+npx tsx impact.test.mjs <usage.csv> <permissions.csv>               # run the impact report against it
 ```
 
 Client files (DACS exports, vendor notices) aren't committed. `.gitignore` excludes `sample-data/` apart from the invented B-PIPE sample.
