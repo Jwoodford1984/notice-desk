@@ -38,7 +38,7 @@ export function usageCodes(usage, vendor = 'LSEG') {
 
 export const SEVERITY = {
   'Update RIC': 1, 'RIC removed': 1, 'Order service': 1, 'Content withdrawn': 1, 'Update tickers': 1,
-  'Check entitlement': 2, 'Review data change': 2, 'Price change': 2, 'Review policy': 2, 'Review notice': 2,
+  'Check entitlement': 2, 'Update PE': 2, 'Review field changes': 2, 'Review data change': 2, 'Price change': 2, 'Review policy': 2, 'Review notice': 2,
   'Information': 3,
 };
 
@@ -92,12 +92,14 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
   for (const u of usage) { const x = person(u.login); x.name ||= u.user_name; x.cost_centre ||= u.cost_centre; x.email ||= u.email; x.group ||= u.user_group; }
 
   const actions = new Map(); // key -> action
+  // Bloomberg notices list the fields they touch ("Impacted fields: A (X1), B (X2)" in the description)
+  const fieldsOf = n => n.vendor === 'Bloomberg' ? ((String(n.description || '').match(/Impacted fields:\s*([^\n]+)/i) || [])[1] || '').replace(/,\s*$/, '').trim() : '';
   const addAction = (n, category, text, login, ric, extra = {}) => {
     const key = `${n.id}|${category}|${extra.groupKey || text}`;
     if (!actions.has(key)) {
       const d = dueText(n.effective_date, today);
       actions.set(key, { notice_id: n.id, ref: n.ref, vendor: n.vendor, title: n.title, effective_date: n.effective_date, due_date: d.due, due_label: d.label,
-        category, severity: SEVERITY[category] || 3, text, users: new Set(), rics: new Set(), ...extra });
+        category, severity: SEVERITY[category] || 3, text, users: new Set(), rics: new Set(), fields: fieldsOf(n), ...extra });
       delete actions.get(key).groupKey;
     }
     const a = actions.get(key);
@@ -154,9 +156,13 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
         category = 'Review notice'; text = `RICs you use are listed in this notice (${ct || 'change'}). Review what changes for them.`;
         addAction(n, category, text, login, ric);
       }
+      const peOld = String(m.old_pe || '').trim(), peNew = String(m.new_pe || '').trim();
+      if (!bbg && peOld && peNew && peOld !== peNew) {
+        addAction(n, 'Update PE', `These RICs move from PE ${peOld} to PE ${peNew}. Load the new DACS map when it's published (map collect), then update any PE-based permissioning, locks or application entitlements that reference PE ${peOld}.`, login, ric, { groupKey: `pe:${peOld}>${peNew}` });
+      }
       ricDetail.push({ ref: n.ref, effective_date: n.effective_date, login, ric, matched_code: m.code, via, ric_name: m.ric_name || '',
         change: ct, new_code: m.new_code || '', pdp_removed: removed.join(', '), pdp_added: added.join(', '),
-        new_pdps: [...newS].join(', '), access, action: category });
+        new_pdps: [...newS].join(', '), access, action: category, old_pe: peOld, new_pe: peNew });
     }
   }
 
@@ -181,6 +187,10 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
         }
         if (/policy/i.test(types)) {
           addAction(n, 'Review policy', `Policy change for ${uniq([...holdsOld, ...holdsNew]).join(', ')}. Review licensing and declarations.`, login, null, { groupKey: 'policy' });
+        }
+        const peO = String(c.old_pe || '').trim(), peN = String(c.new_pe || '').trim();
+        if (!coveredByRic && peO && peN && peO !== peN) {
+          addAction(n, 'Update PE', `Content under ${uniq([...holdsOld, ...holdsNew]).join(', ')}, which these users hold, moves from PE ${peO} to PE ${peN}. Load the new DACS map when it's published (map collect), then update any PE-based permissioning, locks or application entitlements that reference PE ${peO}.`, login, null, { groupKey: `pe:${peO}>${peN}` });
         }
         const missingNew = [...newS].filter(x => !held.has(x));
         const lostOld = holdsOld.filter(x => !newS.has(x));
@@ -245,6 +255,19 @@ export function buildReport({ usage = [], perms = [], notices = [], changes = []
             new_pdps: newE.join(', '), access: !newE.length ? 'n/a' : holdsNew.length ? 'keeps' : 'loses', action: category });
         }
       }
+    }
+  }
+
+  // ---- LSEG notices tagged "Field / FID change": the files list RICs, not fields, so flag a review
+  // for everyone this notice already affects, with their RICs.
+  const fidNotices = new Set(notices.filter(n => n.vendor !== 'Bloomberg' && !cancelled(n) && (n.change_types || []).some(t => /\bFID\b|field/i.test(t))).map(n => n.id));
+  if (fidNotices.size) {
+    for (const a of [...actions.values()]) {
+      if (!fidNotices.has(a.notice_id) || a.category === 'Review field changes') continue;
+      const n = noticeById.get(a.notice_id);
+      const text = `This notice includes field (FID) changes on content these users use. DACS usage doesn't show which fields people use, so check applications, record templates, screens and spreadsheets against the field changes described in the notice.`;
+      for (const l of a.users) addAction(n, 'Review field changes', text, l, null, { groupKey: 'fid' });
+      for (const r of a.rics) addAction(n, 'Review field changes', text, null, r, { groupKey: 'fid' });
     }
   }
 
@@ -328,15 +351,15 @@ export function reportSheets(report, people) {
       Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Action: a.category, 'What to do': a.text,
       Vendor: a.vendor || '', Users: a.site ? 'All B-PIPE users' : a.users.map(who).join('; '), 'User count': a.users.length,
       'Cost per user (GBP/month)': a.cost_per_user_gbp != null ? Math.round(a.cost_per_user_gbp * 100) / 100 : '',
-      'Est. monthly cost (GBP)': a.cost_month_gbp != null ? Math.round(a.cost_month_gbp * 100) / 100 : '', 'Cost note': a.cost_note || '', RICs: a.rics.slice(0, 50).join(' '), 'RIC count': a.rics.length })),
+      'Est. monthly cost (GBP)': a.cost_month_gbp != null ? Math.round(a.cost_month_gbp * 100) / 100 : '', 'Cost note': a.cost_note || '', 'Fields affected': a.fields || '', RICs: a.rics.slice(0, 50).join(' '), 'RIC count': a.rics.length })),
     'By user': report.users.flatMap(u => u.actions.map(a => ({ Login: u.login, Name: u.name, 'Cost centre': u.cost_centre, Email: u.email,
-      Notice: a.ref, Title: a.title, Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Priority: a.severity === 1 ? 'Urgent' : a.severity === 2 ? 'Review' : 'Info', Action: a.category, 'Changes needed': a.text, 'Cost note': a.cost_note || '',
+      Notice: a.ref, Title: a.title, Effective: a.effective_date || '', Due: a.due_label || a.due_date || '', Priority: a.severity === 1 ? 'Urgent' : a.severity === 2 ? 'Review' : 'Info', Action: a.category, 'Changes needed': a.text, 'Cost note': a.cost_note || '', 'Fields affected': a.fields || '',
       [a.vendor === 'Bloomberg' ? 'Tickers' : 'RICs']: report.ricDetail.filter(d => d.login === u.login && d.ref === a.ref).map(d => d.ric).slice(0, 50).join(' ') }))),
     'By notice': report.notices.map(n => ({ Notice: n.ref, Title: n.title, Effective: n.effective_date || '', 'Change types': (n.change_types || []).join(', '),
       Users: n.users.length, RICs: n.rics.length, Actions: n.actions.map(a => `${a.category} (${a.site ? 'all B-PIPE users' : a.users.length + ' users'}): ${a.text}`).join('\n'), Summary: n.summary || '' })),
     'RIC detail': report.ricDetail.map(r => ({ Notice: r.ref, Effective: r.effective_date || '', Login: r.login, Name: name(r.login), RIC: r.ric,
       'Matched on': r.via === 'chain' ? `chain of ${r.matched_code}` : r.via === 'eid' ? `EID ${r.matched_code}` : r.matched_code, 'RIC name': r.ric_name, Change: r.change, 'New RIC': r.new_code,
-      'PDP removed': r.pdp_removed, 'PDP added': r.pdp_added, 'New PDPs': r.new_pdps, Access: r.access, Action: r.action })),
+      'PDP removed': r.pdp_removed, 'PDP added': r.pdp_added, 'New PDPs': r.new_pdps, 'Old PE': r.old_pe || '', 'New PE': r.new_pe || '', Access: r.access, Action: r.action })),
     'PDP detail': report.pdpDetail.map(p => ({ Notice: p.ref, Login: p.login, Name: name(p.login), 'Holds': p.held, 'Old PDP': p.old_pdp, 'New PDP': p.new_pdp,
       'Old price': p.old_price, 'New price': p.new_price })),
   };

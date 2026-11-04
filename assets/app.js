@@ -162,13 +162,14 @@ function reportHtml(r) {
       ${inNotice ? '' : `<div class="muted" style="font-size:12px;margin:2px 0">${esc(a.title)}</div>`}
       <div style="font-size:13px">${esc(a.text)}</div>
       ${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:2px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}
+      ${a.fields ? `<div class="muted" style="font-size:12px;margin-top:2px"><b>Fields affected:</b> <span class="mono">${esc(a.fields)}</span></div>` : ''}
       ${mine.length ? `<details style="margin-top:2px"><summary style="font-size:12px">${num(mine.length)} ${unit}${mine.length === 1 ? '' : 's'} affected</summary><div class="mono" style="font-size:12px;margin-top:4px">${mine.slice(0, 200).map(esc).join(' ')}${mine.length > 200 ? ' …' : ''}</div></details>` : ''}
     </div>`;
   };
   if (t === 'actions') body = r.actions.length ? `<div class="tbl-wrap"><table><thead><tr><th>Priority</th><th>Notice</th><th>Action</th><th>Users</th><th>Due</th></tr></thead><tbody>
     ${r.actions.map((a, i) => `<tr><td>${sevPill(a.severity)}</td>
       <td style="min-width:200px"><span class="chip vendor">${esc(a.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(a.ref)}</span><br><span class="muted" style="font-size:12px">${esc(a.title)}</span></td>
-      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:4px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
+      <td style="min-width:280px"><b>${esc(a.category)}</b><br>${esc(a.text)}${a.cost_note ? `<div class="muted" style="font-size:12px;margin-top:4px"><b>Cost:</b> ${esc(a.cost_note)}</div>` : ''}${a.fields ? `<div class="muted" style="font-size:12px;margin-top:4px"><b>Fields affected:</b> <span class="mono">${esc(a.fields)}</span></div>` : ''}${a.rics.length ? `<details style="margin-top:4px"><summary style="font-size:12px">${num(a.rics.length)} ${a.vendor === 'Bloomberg' ? 'ticker' : 'RIC'}${a.rics.length === 1 ? '' : 's'}</summary><div class="mono" style="font-size:12px;margin-top:4px">${a.rics.slice(0, 200).map(esc).join(' ')}${a.rics.length > 200 ? ' …' : ''}</div></details>` : ''}</td>
       <td style="min-width:200px">${a.site ? '<span class="chip">All B-PIPE users</span>' : ''}${a.users.slice(0, 6).map(personChip).join('')}${a.users.length > 6 ? `<details><summary style="font-size:12px">+${a.users.length - 6} more</summary>${a.users.slice(6).map(personChip).join('')}</details>` : ''}</td>
       <td style="white-space:nowrap">${a.due_label ? `<span class="${a.severity === 1 ? 'tag-used' : ''}">${esc(a.due_label)}</span>` : fmtDate(a.due_date)}<br><span class="muted" style="font-size:12px">effective ${fmtDate(a.effective_date)}</span></td></tr>`).join('')}
     </tbody></table></div>` : '<p class="empty">No actions. None of this library\'s notices affect the users or RICs in your files.</p>';
@@ -181,10 +182,11 @@ function reportHtml(r) {
     ${r.notices.map(n => `<tr><td style="min-width:260px"><span class="chip vendor">${esc(n.vendor === 'Bloomberg' ? 'BBG' : 'LSEG')}</span> <span class="mono">${esc(n.ref)}</span> ${sevPill(n.top)}<br>${esc(n.title)}${n.summary ? `<details><summary style="font-size:12px">Summary</summary><div style="font-size:13px;margin-top:4px">${esc(n.summary)}</div></details>` : ''}</td>
       <td style="white-space:nowrap">${fmtDate(n.effective_date)}</td><td style="min-width:380px">${n.actions.map(a => changeBlock(a, null, true).replace('</b>', `</b> <span class="muted" style="font-size:12px">· ${a.site ? 'all B-PIPE users' : `${a.users.length} user${a.users.length === 1 ? '' : 's'}`}</span>`)).join('')}</td>
       <td class="num mono">${n.users.length}</td><td class="num mono">${num(n.rics.length)}</td></tr>`).join('')}</tbody></table></div>`;
-  if (t === 'rics') body = r.ricDetail.length ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>User</th><th>Notice</th><th>Change</th><th>PDPs</th><th>Access</th></tr></thead><tbody>
+  if (t === 'rics') body = r.ricDetail.length ? `<div class="tbl-wrap"><table><thead><tr><th>RIC</th><th>User</th><th>Notice</th><th>Change</th><th>PDPs</th><th>PE</th><th>Access</th></tr></thead><tbody>
     ${r.ricDetail.slice(0, 2000).map(d => `<tr><td class="mono">${esc(d.ric)}${d.via === 'chain' ? `<br><span class="muted" style="font-size:11px">chain of ${esc(d.matched_code)}</span>` : d.via === 'eid' ? `<br><span class="muted" style="font-size:11px">${esc(d.ric_name)}</span>` : ''}${d.new_code ? `<br>→ ${esc(d.new_code)}` : ''}</td>
       <td>${esc(r.people.get(d.login)?.name || d.login)}</td><td class="mono">${esc(d.ref)}</td><td>${esc(d.change)}</td>
       <td class="mono" style="font-size:12px">${d.pdp_removed ? `<span class="tag-used">−${esc(d.pdp_removed)}</span> ` : ''}${d.pdp_added ? `<span style="color:var(--ok);font-weight:600">+${esc(d.pdp_added)}</span>` : ''}${!d.pdp_removed && !d.pdp_added ? '—' : ''}</td>
+      <td class="mono" style="font-size:12px">${d.old_pe && d.new_pe && d.old_pe !== d.new_pe ? `${esc(d.old_pe)} → <b>${esc(d.new_pe)}</b>` : esc(d.new_pe || d.old_pe || '—')}</td>
       <td>${d.access === 'loses' ? '<span class="tag-used">Loses access</span>' : d.access === 'keeps' ? 'Keeps access' : `<span class="muted">${esc(d.access)}</span>`}</td></tr>`).join('')}
     </tbody></table></div>${r.ricDetail.length > 2000 ? '<p class="muted">Showing the first 2,000 rows. The Excel download has them all.</p>' : ''}`
     : `<p class="empty">${S.files.some(f => f.kind === 'usage') ? 'None of your RICs or tickers appear in the library\'s notices.' : 'Add your DACS usage file to see RIC and ticker detail.'}</p>`;
@@ -222,7 +224,7 @@ async function runCheck() {
     const usage = S.files.filter(f => f.kind === 'usage').flatMap(f => f.rows);
     const perms = S.files.filter(f => f.kind === 'perms').flatMap(f => f.rows);
     const [notices, changes, prices] = await Promise.all([
-      all(() => sb.from('lib_notices').select('id, ref, vendor, title, change_types, effective_date, summary, vendor_status, action_required').order('id')),
+      all(() => sb.from('lib_notices').select('id, ref, vendor, title, change_types, effective_date, summary, description, vendor_status, action_required').order('id')),
       all(() => sb.from('lib_service_changes').select('notice_id, old_pdp, new_pdp, old_pe, new_pe, old_price, new_price').order('id')),
       all(() => sb.from('lib_prices').select('vendor, pdp, service_name, billed_by, user_charge, currency, site_licence, price_gbp').order('pdp')),
     ]);
